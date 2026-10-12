@@ -36,6 +36,8 @@ COPY docker/entrypoint.sh /entrypoint.sh
 # init_db runs `alembic upgrade head` on start, so the migrations ship too.
 COPY alembic.ini .
 COPY alembic/ ./alembic/
+# PDF for the seeded template; copied into the uploads volume on first start.
+COPY data/inputs/file_template_manual.pdf ./data/inputs/
 
 # Bake deps hash so the entrypoint can skip the redundant install when unchanged.
 RUN sha256sum requirements.txt | cut -d' ' -f1 > /opt/req_hash
