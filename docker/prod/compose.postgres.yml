@@ -20,6 +20,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Only applies when this file is used: start the app and worker once the
+  # database is healthy (both run against it on startup).
+  app:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  celery-worker:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
     driver: local
