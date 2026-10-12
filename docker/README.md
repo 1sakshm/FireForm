@@ -28,6 +28,6 @@ See `.env.example` for the full list with descriptions.
 | ------------------ | ---------------------- | ----------------------------------- |
 | `postgres_data`    | `/var/lib/postgresql/data` | PostgreSQL database             |
 | `redis_data`       | `/data`                | Redis job queue (dev)               |
-| `fireform_uploads` | `/data/uploads`        | Uploaded templates + generated PDFs |
+| `fireform_uploads` | `/data/uploads` (dev), `/app/data` (prod) | Uploaded templates + generated PDFs |
 | `ollama_data`      | `/root/.ollama`        | Ollama model weights                |
 | `whisper_models`   | `/data/whisper`        | Whisper model cache                 |
