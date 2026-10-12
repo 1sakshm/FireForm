@@ -11,6 +11,7 @@ from app.api.schemas.templates import (
     TemplateUploadResponse,
 )
 from app.core import paths
+from app.core.errors.base import AppError
 from app.core.pdf_utils import _count_pdf_widgets, _extract_pdf_fields
 from app.db.repositories import (
     create_template,
@@ -153,8 +154,12 @@ class TemplateService:
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             from commonforms import prepare_form
             prepare_form(resolved_pdf_path, template_path)
-        except Exception:
-            template_path = resolved_pdf_path
+        except Exception as e:
+            raise AppError(
+                f"Could not make the PDF fillable: {str(e) or type(e).__name__}",
+                status_code=500,
+                error_code="MAKE_FILLABLE_FAILED",
+            ) from e
 
         new_path = Path(template_path)
         if not new_path.is_absolute():
