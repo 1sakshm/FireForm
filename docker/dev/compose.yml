@@ -152,6 +152,7 @@ services:
       - FIREFORM_TEMPLATE_DIR=/data/uploads
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - WHISPER_HOST=${WHISPER_HOST:-http://whisper:9000}
     networks:
       - fireform-network
 
