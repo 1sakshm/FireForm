@@ -6,7 +6,7 @@ docker/
     Dockerfile        # uvicorn --reload, source-mounted for hot reload
     compose.yml
   prod/
-    Dockerfile        # multi-stage build, gunicorn, no source mount
+    Dockerfile        # multi-stage build, uvicorn workers, no source mount
     compose.yml
     compose.postgres.yml  # optional standalone PostgreSQL for prod
   .env.example        # template — copy to .env.dev or .env.prod

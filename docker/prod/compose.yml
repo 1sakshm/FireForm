@@ -47,11 +47,7 @@ services:
         condition: service_healthy
       whisper:
         condition: service_started
-    command: ["gunicorn", "app.main:app",
-              "--worker-class", "uvicorn.workers.UvicornWorker",
-              "--bind", "0.0.0.0:8000",
-              "--access-logfile", "-",
-              "--error-logfile", "-"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - fireform_uploads:/data/uploads
     ports:

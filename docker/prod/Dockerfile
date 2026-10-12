@@ -47,8 +47,5 @@ RUN mkdir -p /data/db /data/uploads && chmod +x /entrypoint.sh
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["gunicorn", "app.main:app", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+# Worker count comes from WEB_CONCURRENCY (uvicorn's --workers default).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
