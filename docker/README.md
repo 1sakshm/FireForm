@@ -8,6 +8,7 @@ docker/
   prod/
     Dockerfile        # multi-stage build, gunicorn, no source mount
     compose.yml
+    compose.postgres.yml  # optional standalone PostgreSQL for prod
   .env.example        # template — copy to .env.dev or .env.prod
   .env.dev            # gitignored, dev values
   .env.prod           # gitignored, prod values
@@ -25,7 +26,8 @@ See `.env.example` for the full list with descriptions.
 
 | Volume             | Path in container      | Purpose                             |
 | ------------------ | ---------------------- | ----------------------------------- |
-| `fireform_db`      | `/data/db/fireform.db` | SQLite database                     |
+| `postgres_data`    | `/var/lib/postgresql/data` | PostgreSQL database             |
+| `redis_data`       | `/data`                | Redis job queue (dev)               |
 | `fireform_uploads` | `/data/uploads`        | Uploaded templates + generated PDFs |
 | `ollama_data`      | `/root/.ollama`        | Ollama model weights                |
 | `whisper_models`   | `/data/whisper`        | Whisper model cache                 |
