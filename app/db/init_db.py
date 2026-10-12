@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from alembic.config import Config
+from alembic.util import CommandError
 from sqlmodel import Session, select
 
 from alembic import command
@@ -22,7 +23,20 @@ def _alembic_cfg() -> Config:
 
 def run_migrations():
     logger.info("Running Alembic migrations...")
-    command.upgrade(_alembic_cfg(), "head")
+    try:
+        command.upgrade(_alembic_cfg(), "head")
+    except CommandError as e:
+        if "Can't locate revision" not in str(e):
+            raise
+        # Exit non-zero with a readable message instead of a bare stack trace.
+        raise SystemExit(
+            f"[init_db] {e}.\n"
+            "The database is stamped with a migration revision this code does not know\n"
+            "(e.g. a DB created by another branch). Either reset the dev database:\n"
+            "    make down && docker volume rm dev_postgres_data\n"
+            "or re-stamp it to a revision in alembic/versions/:\n"
+            "    alembic stamp <revision>"
+        ) from e
     logger.info("Migrations complete.")
 
 
