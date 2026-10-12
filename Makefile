@@ -1,4 +1,4 @@
-.PHONY: help init fireform fireform-native build up up-native native-banner down logs logs-app logs-ollama shell pull-model test clean super-clean status ready-banner sync docs
+.PHONY: help init fireform fireform-native build up up-native native-banner down logs logs-app logs-ollama shell pull-model test clean super-clean status ready-banner wait-healthy sync docs
 
 # Bundled Ollama is behind a compose profile. COMPOSE includes it, so every
 # standard target runs the full in-Docker stack as before. COMPOSE_NATIVE leaves
@@ -101,7 +101,26 @@ sync:
 status:
 	@$(COMPOSE) ps --format 'table {{.Service}}\t{{.Status}}'
 
-ready-banner:
+# Poll the API health endpoint so the banner only prints once the app answers.
+# APP_PORT comes from .env.dev like OLLAMA_MODEL (compose maps ${APP_PORT:-8000}).
+APP_PORT       = $(or $(shell grep -E '^APP_PORT=' $(ENV_DEV) 2>/dev/null | cut -d= -f2 | tr -d '[:space:]'),8000)
+HEALTH_URL     ?= http://localhost:$(APP_PORT)/api/v1/health
+HEALTH_TIMEOUT ?= 120
+
+wait-healthy:
+	@printf "Waiting for the API at $(HEALTH_URL) "; \
+	start=$$(date +%s); \
+	until curl -fsS --max-time 5 -o /dev/null "$(HEALTH_URL)" 2>/dev/null; do \
+		if [ $$(( $$(date +%s) - start )) -ge $(HEALTH_TIMEOUT) ]; then \
+			echo ""; \
+			echo "FireForm did not become healthy within $(HEALTH_TIMEOUT)s. Run 'make logs-app' to see why."; \
+			exit 1; \
+		fi; \
+		printf "."; sleep 2; \
+	done; \
+	echo "up."
+
+ready-banner: wait-healthy
 	@echo ""
 	@echo "FireForm is ready!"
 	@echo "   API:      http://localhost:8000"
