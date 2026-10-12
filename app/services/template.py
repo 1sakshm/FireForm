@@ -8,6 +8,7 @@ from app.api.schemas.templates import (
     MakeFillableResponse,
     TemplateCreate,
     TemplateResponse,
+    TemplateUpdate,
     TemplateUploadResponse,
 )
 from app.core import paths
@@ -19,6 +20,7 @@ from app.db.repositories import (
     get_jobs_by_template,
     get_submissions_by_template,
     list_templates as repo_list_templates,
+    update_template,
 )
 from app.models import Template
 from app.services.form_filler.template import create_template as extract_pdf_template
@@ -200,3 +202,16 @@ class TemplateService:
                 pass
 
         delete_template(session, template)
+
+    def update_template(
+        self, session: Session, template: Template, changes: TemplateUpdate
+    ) -> TemplateResponse:
+        # Only the fields sent are changed; pdf_path stays as it was.
+        if changes.name is not None:
+            template.name = changes.name
+        if changes.fields is not None:
+            template.fields = changes.fields
+        updated = update_template(session, template)
+        response = TemplateResponse.model_validate(updated)
+        response.field_count = self._calculate_field_count(updated.fields, updated.pdf_path)
+        return response

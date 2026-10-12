@@ -172,6 +172,33 @@ class TestTemplateEndpoints:
         assert resp.status_code == 400
         assert "inside the project" in resp.json()["detail"]
 
+    def test_update_template(self, client, mock_controller):
+        created = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "T1",
+            "pdf_path": "a.pdf",
+            "fields": {"f": "string"},
+        }).json()
+
+        resp = client.put(f"{API_PREFIX}/templates/{created['id']}", json={"name": "T2"})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "T2"
+        # Fields not sent are left unchanged
+        assert resp.json()["fields"] == {"f": "string"}
+        assert resp.json()["pdf_path"] == "a.pdf"
+
+        resp = client.put(
+            f"{API_PREFIX}/templates/{created['id']}",
+            json={"fields": {"g": "string", "h": "string"}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["fields"] == {"g": "string", "h": "string"}
+        assert resp.json()["field_count"] == 2
+        assert client.get(f"{API_PREFIX}/templates").json()[0]["name"] == "T2"
+
+    def test_update_missing_template(self, client):
+        resp = client.put(f"{API_PREFIX}/templates/9999", json={"name": "T2"})
+        assert resp.status_code == 404
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Form fill endpoints

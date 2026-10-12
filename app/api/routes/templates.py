@@ -10,6 +10,7 @@ from app.api.schemas.templates import (
     MakeFillableResponse,
     TemplateCreate,
     TemplateResponse,
+    TemplateUpdate,
     TemplateUploadResponse,
 )
 from app.core.config import DEFAULT_TEMPLATE_DIR
@@ -71,6 +72,17 @@ def make_fillable(req: MakeFillableRequest):
         raise HTTPException(status_code=404, detail="PDF file not found.")
 
     return svc.make_fillable(str(resolved))
+
+
+@router.put("/{template_id}", response_model=TemplateResponse)
+def update_template_endpoint(
+    template_id: int, changes: TemplateUpdate, db: Session = Depends(get_db)
+):
+    template = get_template(db, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    return TemplateService().update_template(db, template, changes)
 
 
 @router.delete("/{template_id}", dependencies=[Depends(verify_api_key)])
