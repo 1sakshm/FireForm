@@ -23,6 +23,7 @@ from app.db.repositories import (
     update_template,
 )
 from app.models import Template
+from app.services.commonforms_compat import patch_commonforms_detector
 from app.services.form_filler.template import create_template as extract_pdf_template
 
 
@@ -155,6 +156,7 @@ class TemplateService:
             import os
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             from commonforms import prepare_form
+            patch_commonforms_detector()
             prepare_form(resolved_pdf_path, template_path)
         except Exception as e:
             raise AppError(
