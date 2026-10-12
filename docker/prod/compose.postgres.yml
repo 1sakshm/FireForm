@@ -10,6 +10,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
+    # Same network as the app in compose.yml, so DATABASE_URL can use @postgres:5432.
+    networks:
+      - fireform-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fireform}"]
@@ -20,3 +23,7 @@ services:
 volumes:
   postgres_data:
     driver: local
+
+networks:
+  fireform-network:
+    driver: bridge

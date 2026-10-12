@@ -34,7 +34,7 @@ make fireform
 
 For deployment on a Linux station server:
 
-1.  **Start services:** `docker compose -f docker/prod/compose.yml --env-file docker/.env.prod up -d`
+1.  **Start services:** `docker compose -f docker/prod/compose.yml -f docker/prod/compose.postgres.yml --env-file docker/.env.prod up -d` (leave out `compose.postgres.yml` if `DATABASE_URL` points at an existing PostgreSQL server)
 2.  **Pull model:** `docker compose -f docker/prod/compose.yml --env-file docker/.env.prod exec ollama ollama pull <OLLAMA_MODEL>`
 3.  **Access:** The FireForm API is now accessible at `http://<station-server-ip>:8000`
 
