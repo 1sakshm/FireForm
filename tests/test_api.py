@@ -434,6 +434,37 @@ class TestFormEndpoints:
         assert all(model["installed"] is False for model in body["models"])
         assert all(model["recommended"] is True for model in body["models"])
 
+    def test_list_models_malformed_ollama_response(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"models": {"name": "broken"}}
+        monkeypatch.setattr("app.api.routes.forms.requests.get", lambda *a, **k: fake_response)
+
+        resp = client.get(f"{API_PREFIX}/forms/models")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert all(model["installed"] is False for model in body["models"])
+        assert all(model["recommended"] is True for model in body["models"])
+
+    def test_list_models_invalid_json(self, client, monkeypatch):
+        import json
+        from unittest.mock import MagicMock
+
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.side_effect = json.JSONDecodeError("invalid", "", 0)
+        monkeypatch.setattr("app.api.routes.forms.requests.get", lambda *a, **k: fake_response)
+
+        resp = client.get(f"{API_PREFIX}/forms/models")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert all(model["installed"] is False for model in body["models"])
+        assert all(model["recommended"] is True for model in body["models"])
+
     def test_pull_model_success(self, client, monkeypatch):
         from unittest.mock import MagicMock
 

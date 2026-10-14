@@ -78,12 +78,14 @@ def list_models():
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
         response.raise_for_status()
-        installed_names = {
-            model["name"]
-            for model in response.json().get("models", [])
-            if isinstance(model, dict) and model.get("name")
-        }
-    except requests.exceptions.RequestException:
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+            raise ValueError("Unexpected Ollama tags response")
+        for model in payload["models"]:
+            if not isinstance(model, dict) or not isinstance(model.get("name"), str):
+                raise ValueError("Unexpected Ollama tags response")
+            installed_names.add(model["name"])
+    except (requests.exceptions.RequestException, ValueError, TypeError):
         pass
 
     all_names = sorted(set(RECOMMENDED_MODELS) | installed_names)
