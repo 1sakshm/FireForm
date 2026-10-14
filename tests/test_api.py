@@ -559,6 +559,24 @@ class TestFormEndpoints:
         call_args = mock_controller["mock_fill"].call_args
         assert call_args.kwargs.get("model") == "qwen2.5:3b" or call_args.args[3] == "qwen2.5:3b"
 
+    def test_fill_form_without_model_preserves_default_path(
+        self, client, mock_controller, db, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "employee.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+        tpl_id = self._seed_template_at(client, str(pdf_file.relative_to(tmp_path)))
+        input_id = self._seed_input(db, transcript="John Doe")
+
+        resp = client.post(f"{API_PREFIX}/forms/fill", json={
+            "template_id": tpl_id,
+            "input_id": str(input_id),
+        })
+
+        assert resp.status_code == 200
+        call_args = mock_controller["mock_fill"].call_args
+        assert call_args.kwargs.get("model") is None
+
     def test_fill_form_returns_422_for_uninstalled_model(
         self, client, mock_controller, db, tmp_path, monkeypatch
     ):
