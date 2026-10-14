@@ -496,6 +496,21 @@ class TestFormEndpoints:
         assert lines[-1] == {"error": "pull failed"}
         assert {"status": "success"} not in lines
 
+    def test_pull_model_rejects_invalid_model_name(self, client):
+        resp = client.post(f"{API_PREFIX}/forms/pull", json={"model": "bad model"})
+
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "VALIDATION_ERROR"
+
+    def test_fill_form_rejects_invalid_model_name(self, client):
+        resp = client.post(
+            f"{API_PREFIX}/forms/fill",
+            json={"template_id": 1, "input_text": "text", "model": "   "},
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "VALIDATION_ERROR"
+
     def test_fill_form_passes_model_override(self, client, mock_controller, db, tmp_path, monkeypatch):
         """A `model` in the request reaches filler.fill as a keyword argument."""
         monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
