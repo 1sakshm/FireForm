@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app.api.deps import get_db
@@ -62,17 +65,29 @@ def submit_async_form_fill(form: AsyncFormFill, db: Session = Depends(get_db)):
                 (tid, transcript, str(form.input_id), form.model), task_id=job.celery_task_id
             )
         except Exception as e:
-            # Broker unreachable: don't leave the committed row queued forever.
-            from datetime import datetime, timezone
+            # Broker unreachable: mark this job row as failed so it is never
+            # left stuck in "queued" forever.
             job.status = JobStatus.failed
             job.error = {"error_code": "QUEUE_UNAVAILABLE", "message": str(e)}
             job.updated_at = datetime.now(timezone.utc)
             update_job(db, job)
+
+            # If earlier iterations already published jobs successfully, return
+            # a 207 Multi-Status so the client can still discover and poll those
+            # jobs.  A plain 503 would discard the accumulated job list and make
+            # those jobs invisible, risking duplicate submissions on retry.
+            error_msg = f"Could not queue fill job for template {tid}: {e}"
+            if jobs:
+                body = AsyncFormFillResponse(jobs=jobs, error=error_msg)
+                return JSONResponse(status_code=207, content=body.model_dump())
+
+            # Nothing was queued at all — a normal 503 is appropriate.
             raise AppError(
-                f"Could not queue the fill job: {e}",
+                error_msg,
                 status_code=503,
                 error_code="QUEUE_UNAVAILABLE",
             ) from e
+
         jobs.append(AsyncJobSubmitResponse(
             job_id=job.job_id,
             status=job.status,
@@ -80,3 +95,4 @@ def submit_async_form_fill(form: AsyncFormFill, db: Session = Depends(get_db)):
         ))
 
     return AsyncFormFillResponse(jobs=jobs)
+
