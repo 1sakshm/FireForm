@@ -107,6 +107,22 @@ def pull_model(req: ModelPullRequest):
     """Stream pull progress from Ollama as newline-delimited JSON."""
 
     def generate():
+        saw_error = False
+        saw_success = False
+        buffer = ""
+
+        def inspect_lines(chunk: bytes) -> None:
+            nonlocal buffer, saw_error, saw_success
+            buffer += chunk.decode("utf-8")
+            lines = buffer.split("\n")
+            buffer = lines.pop() or ""
+            for line in lines:
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                saw_error = saw_error or "error" in event
+                saw_success = saw_success or event.get("status") == "success"
+
         try:
             with requests.post(
                 f"{OLLAMA_HOST}/api/pull",
@@ -117,8 +133,14 @@ def pull_model(req: ModelPullRequest):
                 response.raise_for_status()
                 for chunk in response.iter_content(chunk_size=None):
                     if chunk:
+                        inspect_lines(chunk)
                         yield chunk
-            yield (json.dumps({"status": "success"}) + "\n").encode("utf-8")
+            if buffer.strip():
+                event = json.loads(buffer)
+                saw_error = saw_error or "error" in event
+                saw_success = saw_success or event.get("status") == "success"
+            if not saw_error and not saw_success:
+                yield (json.dumps({"status": "success"}) + "\n").encode("utf-8")
         except requests.exceptions.RequestException as exc:
             yield (json.dumps({"error": str(exc)}) + "\n").encode("utf-8")
 

@@ -477,6 +477,25 @@ class TestFormEndpoints:
         assert lines
         assert "error" in json.loads(lines[-1])
 
+    def test_pull_model_mid_stream_error_does_not_append_success(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_response = MagicMock()
+        fake_response.iter_content.return_value = [
+            b'{"status":"pulling"}\n',
+            b'{"error":"pull failed"}\n',
+        ]
+        fake_response.raise_for_status.return_value = None
+        fake_response.__enter__.return_value = fake_response
+        fake_response.__exit__.return_value = None
+        monkeypatch.setattr("app.api.routes.forms.requests.post", lambda *a, **k: fake_response)
+
+        resp = client.post(f"{API_PREFIX}/forms/pull", json={"model": "llama3.2:3b"})
+
+        lines = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+        assert lines[-1] == {"error": "pull failed"}
+        assert {"status": "success"} not in lines
+
     def test_fill_form_passes_model_override(self, client, mock_controller, db, tmp_path, monkeypatch):
         """A `model` in the request reaches filler.fill as a keyword argument."""
         monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
