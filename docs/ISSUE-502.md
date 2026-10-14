@@ -89,6 +89,14 @@ Invoke-WebRequest `
 Confirm afterwards that the selected model has `"installed": true` in
 `GET /api/v1/forms/models`.
 
+If Ollama fails after streaming has started, the response remains NDJSON and
+ends with an error event instead of a success event:
+
+```text
+{"status":"pulling manifest"}
+{"error":"Ollama connection refused"}
+```
+
 ### Fill with an explicit model
 
 ```powershell
