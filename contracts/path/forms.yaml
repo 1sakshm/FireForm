@@ -58,6 +58,15 @@ fill:
               message: "Input 550e8400-e29b-41d4-a716-446655440001 is not ready (status: transcribing)"
               detail:
                 status: "transcribing"
+      "422":
+        description: The requested model is not installed in Ollama
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "MODEL_NOT_INSTALLED"
+              message: "Model 'mistral:7b' is not installed in Ollama. Pull it first via POST /forms/pull."
       "500":
         description: Form fill failed (LLM or PDF generation error)
         content:
