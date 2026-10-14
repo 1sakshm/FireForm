@@ -37,6 +37,20 @@ services:
       retries: 5
       start_period: 60s
 
+  redis:
+    image: redis:7-alpine
+    container_name: fireform-redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - fireform-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   app:
     build:
       context: ../..
@@ -47,13 +61,13 @@ services:
         condition: service_healthy
       whisper:
         condition: service_started
-    command: ["gunicorn", "app.main:app",
-              "--worker-class", "uvicorn.workers.UvicornWorker",
-              "--bind", "0.0.0.0:8000",
-              "--access-logfile", "-",
-              "--error-logfile", "-"]
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
-      - fireform_uploads:/data/uploads
+      # Under /app (the project root) so uploaded and filled PDFs pass the
+      # "inside the project" path guard and persist across container updates.
+      - fireform_uploads:/app/data
     ports:
       - "${APP_PORT}:8000"
     environment:
@@ -65,11 +79,46 @@ services:
       - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT}
       - OLLAMA_MODEL=${OLLAMA_MODEL}
       - WHISPER_HOST=${WHISPER_HOST}
-      - FIREFORM_DATA_DIR=/data/uploads
-      - FIREFORM_TEMPLATE_DIR=/data/uploads
+      - FIREFORM_DATA_DIR=/app/data
+      - FIREFORM_TEMPLATE_DIR=data/inputs
       - FIREFORM_DB_ECHO=false
       - FRONTEND_ORIGINS=${FRONTEND_ORIGINS}
       - WEB_CONCURRENCY=${GUNICORN_WORKERS}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    networks:
+      - fireform-network
+    restart: unless-stopped
+
+  # Runs the async fill (/forms/jobs) and voice transcription (/input/voice)
+  # jobs. Same image as the app; skips the entrypoint because the app already
+  # runs the migrations.
+  celery-worker:
+    build:
+      context: ../..
+      dockerfile: docker/prod/Dockerfile
+    container_name: fireform-celery-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: []
+    command: ["celery", "-A", "app.core.celery:celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    volumes:
+      - fireform_uploads:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=
+      - PYTHONPATH=/app
+      - DATABASE_URL=${DATABASE_URL}
+      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT}
+      - OLLAMA_MODEL=${OLLAMA_MODEL}
+      - WHISPER_HOST=${WHISPER_HOST}
+      - FIREFORM_DATA_DIR=/app/data
+      - FIREFORM_TEMPLATE_DIR=data/inputs
+      - FIREFORM_DB_ECHO=false
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     networks:
       - fireform-network
     restart: unless-stopped
@@ -80,6 +129,8 @@ volumes:
   whisper_models:
     driver: local
   fireform_uploads:
+    driver: local
+  redis_data:
     driver: local
 
 networks:

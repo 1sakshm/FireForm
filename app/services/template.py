@@ -8,9 +8,11 @@ from app.api.schemas.templates import (
     MakeFillableResponse,
     TemplateCreate,
     TemplateResponse,
+    TemplateUpdate,
     TemplateUploadResponse,
 )
 from app.core import paths
+from app.core.errors.base import AppError
 from app.core.pdf_utils import _count_pdf_widgets, _extract_pdf_fields
 from app.db.repositories import (
     create_template,
@@ -18,8 +20,10 @@ from app.db.repositories import (
     get_jobs_by_template,
     get_submissions_by_template,
     list_templates as repo_list_templates,
+    update_template,
 )
 from app.models import Template
+from app.services.commonforms_compat import patch_commonforms_detector
 from app.services.form_filler.template import create_template as extract_pdf_template
 
 
@@ -154,9 +158,14 @@ class TemplateService:
             import os
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             from commonforms import prepare_form
+            patch_commonforms_detector()
             prepare_form(resolved_pdf_path, template_path)
-        except Exception:
-            template_path = resolved_pdf_path
+        except Exception as e:
+            raise AppError(
+                f"Could not make the PDF fillable: {str(e) or type(e).__name__}",
+                status_code=500,
+                error_code="MAKE_FILLABLE_FAILED",
+            ) from e
 
         new_path = Path(template_path)
         if not new_path.is_absolute():
@@ -197,3 +206,16 @@ class TemplateService:
                 pass
 
         delete_template(session, template)
+
+    def update_template(
+        self, session: Session, template: Template, changes: TemplateUpdate
+    ) -> TemplateResponse:
+        # Only the fields sent are changed; pdf_path stays as it was.
+        if changes.name is not None:
+            template.name = changes.name
+        if changes.fields is not None:
+            template.fields = changes.fields
+        updated = update_template(session, template)
+        response = TemplateResponse.model_validate(updated)
+        response.field_count = self._calculate_field_count(updated.fields, updated.pdf_path)
+        return response

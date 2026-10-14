@@ -21,6 +21,13 @@ def list_templates(session: Session) -> list[Template]:
     statement = select(Template).order_by(Template.created_at.desc(), Template.id.desc())
     return list(session.exec(statement))
 
+
+def update_template(session: Session, template: Template) -> Template:
+    session.add(template)
+    session.commit()
+    session.refresh(template)
+    return template
+
 # Forms
 def create_form(session: Session, form: FormSubmission) -> FormSubmission:
     session.add(form)

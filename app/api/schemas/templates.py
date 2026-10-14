@@ -7,6 +7,11 @@ class TemplateCreate(BaseModel):
     fields: dict = {}
 
 
+class TemplateUpdate(BaseModel):
+    name: str | None = None
+    fields: dict | None = None
+
+
 class MakeFillableRequest(BaseModel):
     pdf_path: str
 
