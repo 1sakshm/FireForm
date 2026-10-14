@@ -33,6 +33,11 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY app/ ./app/
 COPY requirements.txt .
 COPY docker/entrypoint.sh /entrypoint.sh
+# init_db runs `alembic upgrade head` on start, so the migrations ship too.
+COPY alembic.ini .
+COPY alembic/ ./alembic/
+# PDF for the seeded template; copied into the uploads volume on first start.
+COPY data/inputs/file_template_manual.pdf ./data/inputs/
 
 # Bake deps hash so the entrypoint can skip the redundant install when unchanged.
 RUN sha256sum requirements.txt | cut -d' ' -f1 > /opt/req_hash
@@ -44,8 +49,5 @@ RUN mkdir -p /data/db /data/uploads && chmod +x /entrypoint.sh
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["gunicorn", "app.main:app", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+# Worker count comes from WEB_CONCURRENCY (uvicorn's --workers default).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

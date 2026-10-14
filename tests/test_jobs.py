@@ -1,11 +1,13 @@
 """Tests for async job submission and status endpoints."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch
 from uuid import uuid4
 
-from app.api.schemas.enums import InputStatus, InputType
+from sqlmodel import select
+
+from app.api.schemas.enums import InputStatus, InputType, JobStatus
 from app.core.config import API_PREFIX
-from app.models import Input
+from app.models import Input, Job
 
 
 class TestJobEndpoints:
@@ -27,10 +29,6 @@ class TestJobEndpoints:
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_single(self, mock_task, client, db):
-        mock_result = MagicMock()
-        mock_result.id = "celery-task-id-1"
-        mock_task.delay.return_value = mock_result
-
         tpl_id = self._seed_template(client)
         input_id = self._seed_input(db)
         resp = client.post(f"{API_PREFIX}/forms/jobs", json={
@@ -43,15 +41,13 @@ class TestJobEndpoints:
         assert data["jobs"][0]["status"] == "queued"
         assert "job_id" in data["jobs"][0]
         assert data["jobs"][0]["poll_url"].startswith(f"{API_PREFIX}/jobs/")
-        mock_task.delay.assert_called_once_with(tpl_id, "John Doe firefighter", str(input_id), None)
+        mock_task.apply_async.assert_called_once_with(
+            (tpl_id, "John Doe firefighter", str(input_id), None),
+            task_id=data["jobs"][0]["job_id"],
+        )
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_batch(self, mock_task, client, db):
-        mock_task.delay.side_effect = [
-            MagicMock(id="task-1"),
-            MagicMock(id="task-2"),
-        ]
-
         t1 = self._seed_template(client)
         t2 = self._seed_template(client)
         input_id = self._seed_input(db, transcript="batch input")
@@ -63,7 +59,7 @@ class TestJobEndpoints:
         jobs = resp.json()["jobs"]
         assert len(jobs) == 2
         assert jobs[0]["job_id"] != jobs[1]["job_id"]
-        assert mock_task.delay.call_count == 2
+        assert mock_task.apply_async.call_count == 2
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_missing_template(self, mock_task, client, db):
@@ -73,7 +69,7 @@ class TestJobEndpoints:
             "input_id": str(input_id),
         })
         assert resp.status_code == 404
-        mock_task.delay.assert_not_called()
+        mock_task.apply_async.assert_not_called()
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_missing_input(self, mock_task, client):
@@ -84,7 +80,7 @@ class TestJobEndpoints:
         })
         assert resp.status_code == 404
         assert resp.json()["error_code"] == "INPUT_NOT_FOUND"
-        mock_task.delay.assert_not_called()
+        mock_task.apply_async.assert_not_called()
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_input_transcribing(self, mock_task, client, db):
@@ -100,7 +96,7 @@ class TestJobEndpoints:
         body = resp.json()
         assert body["error_code"] == "INPUT_NOT_READY"
         assert body["detail"]["status"] == "transcribing"
-        mock_task.delay.assert_not_called()
+        mock_task.apply_async.assert_not_called()
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_input_failed(self, mock_task, client, db):
@@ -115,12 +111,10 @@ class TestJobEndpoints:
         body = resp.json()
         assert body["error_code"] == "INPUT_NOT_READY"
         assert body["detail"]["status"] == "failed"
-        mock_task.delay.assert_not_called()
+        mock_task.apply_async.assert_not_called()
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_get_job_status(self, mock_task, client, db):
-        mock_task.delay.return_value = MagicMock(id="celery-abc")
-
         tpl_id = self._seed_template(client)
         input_id = self._seed_input(db, transcript="test input")
         submit_resp = client.post(f"{API_PREFIX}/forms/jobs", json={
@@ -143,8 +137,6 @@ class TestJobEndpoints:
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_with_model_override(self, mock_task, client, db):
-        mock_task.delay.return_value = MagicMock(id="celery-xyz")
-
         tpl_id = self._seed_template(client)
         input_id = self._seed_input(db, transcript="test")
         resp = client.post(f"{API_PREFIX}/forms/jobs", json={
@@ -153,7 +145,9 @@ class TestJobEndpoints:
             "model": "mistral:latest",
         })
         assert resp.status_code == 200
-        mock_task.delay.assert_called_once_with(tpl_id, "test", str(input_id), "mistral:latest")
+        mock_task.apply_async.assert_called_once_with(
+            (tpl_id, "test", str(input_id), "mistral:latest"), task_id=ANY
+        )
 
     def test_submit_empty_template_ids(self, client, db):
         input_id = self._seed_input(db, transcript="test")
@@ -169,3 +163,19 @@ class TestJobEndpoints:
             "input_id": "not-a-uuid",
         })
         assert resp.status_code == 422
+
+    @patch("app.api.routes.jobs.fill_form_task")
+    def test_submit_async_queue_unavailable(self, mock_task, client, db):
+        mock_task.apply_async.side_effect = ConnectionError("redis down")
+
+        tpl_id = self._seed_template(client)
+        input_id = self._seed_input(db)
+        resp = client.post(f"{API_PREFIX}/forms/jobs", json={
+            "template_ids": [tpl_id],
+            "input_id": str(input_id),
+        })
+        assert resp.status_code == 503
+        assert resp.json()["error_code"] == "QUEUE_UNAVAILABLE"
+        job = db.exec(select(Job)).one()
+        assert job.status == JobStatus.failed
+        assert job.error["error_code"] == "QUEUE_UNAVAILABLE"

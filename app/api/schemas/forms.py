@@ -68,3 +68,6 @@ class AsyncJobSubmitResponse(BaseModel):
 
 class AsyncFormFillResponse(BaseModel):
     jobs: list[AsyncJobSubmitResponse]
+    # Present only on a partial failure (HTTP 207): lists the job IDs that were
+    # successfully queued before the broker became unreachable.
+    error: str | None = None

@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 from uuid import UUID
 
 from app.api.schemas.enums import JobStatus
@@ -34,7 +35,9 @@ def fill_form_task(self, template_id: int, input_text: str, input_id_str: str, m
 
         job.status = JobStatus.completed
         job.progress_percent = 100
-        job.result_url = f"/api/v1/forms/{submission.id}/download"
+        job.result_url = (
+            f"/api/v1/templates/preview?path={quote(submission.output_pdf_path, safe='')}"
+        )
         job.updated_at = datetime.now(timezone.utc)
         update_job(session, job)
 
