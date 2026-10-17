@@ -459,6 +459,25 @@ class TestFormEndpoints:
         resp = client.post(f"{API_PREFIX}/forms/transcribe", files=[audio])
         assert resp.status_code == 503
 
+    def test_transcribe_oversize_audio_rejected(self, client, monkeypatch):
+        """Audio over the size limit is rejected with 413 before reaching whisper."""
+        import io
+
+        monkeypatch.setattr("app.api.routes.forms._MAX_AUDIO_BYTES", 5)
+
+        def fake_whisper(*args, **kwargs):
+            raise AssertionError("whisper should not be called")
+
+        monkeypatch.setattr("app.api.routes.forms.call_whisper_asr", fake_whisper)
+
+        audio = ("audio", ("recording.wav", io.BytesIO(b"RIFFfake"), "audio/wav"))  # 8 bytes > 5
+        resp = client.post(f"{API_PREFIX}/forms/transcribe", files=[audio])
+        assert resp.status_code == 413
+        body = resp.json()
+        assert body["error_code"] == "FILE_TOO_LARGE"
+        assert body["detail"]["max_size_bytes"] == 5
+        assert body["detail"]["received_size_bytes"] == 8
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # End-to-end pipeline
