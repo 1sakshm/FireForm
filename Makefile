@@ -3,8 +3,8 @@
 # Bundled Ollama is behind a compose profile. COMPOSE includes it, so every
 # standard target runs the full in-Docker stack as before. COMPOSE_NATIVE leaves
 # it out, for an Ollama on the host or a remote server (see fireform-native).
-COMPOSE        = docker compose -f docker/dev/compose.yml --env-file docker/.env.dev --profile bundled-ollama
-COMPOSE_NATIVE = docker compose -f docker/dev/compose.yml --env-file docker/.env.dev
+COMPOSE        = docker compose -f docker/dev/compose.yml --profile bundled-ollama
+COMPOSE_NATIVE = docker compose -f docker/dev/compose.yml
 ENV_DEV        = docker/.env.dev
 
 # Read OLLAMA_MODEL from .env.dev at runtime; fall back to default if file absent.
