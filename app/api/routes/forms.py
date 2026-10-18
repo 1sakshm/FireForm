@@ -18,6 +18,8 @@ from app.services.form import FormService
 
 router = APIRouter(prefix="/forms", tags=["forms"])
 
+_MAX_AUDIO_BYTES = 500 * 1024 * 1024  # 500 MB, same as /input/voice
+
 
 @router.post("/fill", response_model=FormFillResponse)
 def fill_form(form: FormFill, db: Session = Depends(get_db)):
@@ -78,9 +80,24 @@ def transcribe(audio: UploadFile = File(...)):
     audio is streamed straight through to the local STT service and never
     persisted — no PII leaves the machine.
     """
+    if audio.size is not None and audio.size > _MAX_AUDIO_BYTES:
+        raise AppError(
+            "Audio file exceeds maximum size of 500MB",
+            status_code=413,
+            error_code="FILE_TOO_LARGE",
+            detail={"max_size_bytes": _MAX_AUDIO_BYTES, "received_size_bytes": audio.size},
+        )
+    content = audio.file.read()
+    if len(content) > _MAX_AUDIO_BYTES:
+        raise AppError(
+            "Audio file exceeds maximum size of 500MB",
+            status_code=413,
+            error_code="FILE_TOO_LARGE",
+            detail={"max_size_bytes": _MAX_AUDIO_BYTES, "received_size_bytes": len(content)},
+        )
     try:
         text = call_whisper_asr(
-            audio.file.read(),
+            content,
             audio.filename or "audio.wav",
             audio.content_type or "audio/wav",
         )
