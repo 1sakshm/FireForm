@@ -6,6 +6,8 @@ All heavy dependencies (LLM, commonforms, filesystem) are mocked via conftest.
 
 from uuid import uuid4
 
+import pytest
+
 from sqlmodel import select
 
 from app.api.schemas.enums import InputStatus, InputType
@@ -477,6 +479,62 @@ class TestFormEndpoints:
         assert body["error_code"] == "FILE_TOO_LARGE"
         assert body["detail"]["max_size_bytes"] == 5
         assert body["detail"]["received_size_bytes"] == 8
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Weather endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWeatherEndpoints:
+
+    WEATHER_URL = f"{API_PREFIX}/weather/forecast"
+    VALID = {"latitude": 37.77, "longitude": -122.42, "start_date": "2026-10-19", "end_date": "2026-10-20"}
+
+    def _no_upstream_call(self, monkeypatch):
+        def fake_get_weather(*args, **kwargs):
+            raise AssertionError("Open-Meteo should not be called for invalid input")
+
+        monkeypatch.setattr(
+            "app.api.routes.weather.WeatherAPI.get_weather", fake_get_weather
+        )
+
+    def test_forecast_valid_request(self, client, monkeypatch):
+        captured = {}
+
+        def fake_get_weather(self, latitude, longitude, start_date, end_date, hourly_fields=None):
+            captured.update(latitude=latitude, longitude=longitude, start_date=start_date, end_date=end_date)
+            return {"hourly": {}}
+
+        monkeypatch.setattr("app.api.routes.weather.WeatherAPI.get_weather", fake_get_weather)
+
+        resp = client.get(self.WEATHER_URL, params=self.VALID)
+        assert resp.status_code == 200
+        assert captured == {
+            "latitude": 37.77,
+            "longitude": -122.42,
+            "start_date": "2026-10-19",
+            "end_date": "2026-10-20",
+        }
+
+    @pytest.mark.parametrize(
+        "overrides, field",
+        [
+            ({"latitude": 200}, "query.latitude"),
+            ({"latitude": -90.5}, "query.latitude"),
+            ({"longitude": 181}, "query.longitude"),
+            ({"start_date": "tomorrow"}, "query.start_date"),
+            ({"end_date": "2026-13-01"}, "query.end_date"),
+            ({"start_date": "2026-10-22", "end_date": "2026-10-19"}, "query.end_date"),
+        ],
+    )
+    def test_forecast_invalid_params_rejected(self, client, monkeypatch, overrides, field):
+        self._no_upstream_call(monkeypatch)
+
+        resp = client.get(self.WEATHER_URL, params={**self.VALID, **overrides})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["validation_errors"][0]["field"] == field
 
 
 # ═══════════════════════════════════════════════════════════════════════════
