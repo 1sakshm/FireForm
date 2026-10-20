@@ -57,24 +57,7 @@ ComponentHealth:
       nullable: true
       description: Models the LLM server offers (llm component)
       items:
-        type: object
-        required:
-          - name
-        properties:
-          name:
-            type: string
-          size_gb:
-            type: number
-            nullable: true
-            description: Only Ollama reports this
-          quantization:
-            type: string
-            nullable: true
-            description: Only Ollama reports this
-          loaded:
-            type: boolean
-            nullable: true
-            description: Only Ollama reports this
+        $ref: "#/LLMModel"
     current_load:
       type: object
       nullable: true
@@ -84,6 +67,130 @@ ComponentHealth:
           type: integer
         queued_requests:
           type: integer
+
+LLMModel:
+  type: object
+  required:
+    - name
+  properties:
+    name:
+      type: string
+    size_gb:
+      type: number
+      nullable: true
+      description: Only Ollama reports this
+    quantization:
+      type: string
+      nullable: true
+      description: Only Ollama reports this
+    loaded:
+      type: boolean
+      nullable: true
+      description: Only Ollama reports this
+
+LLMModelChoice:
+  type: object
+  required:
+    - provider
+    - model
+  properties:
+    provider:
+      $ref: "enums.yaml#/LLMProvider"
+    model:
+      type: string
+
+LLMProviderModels:
+  type: object
+  required:
+    - provider
+    - available
+    - models
+  properties:
+    provider:
+      $ref: "enums.yaml#/LLMProvider"
+    available:
+      type: boolean
+      description: False when the provider could not be reached. Its models list
+        is then empty, since nothing can run on it.
+    default_model:
+      type: string
+      nullable: true
+      description: Model used when a request names this provider but no model
+    detail:
+      type: string
+      nullable: true
+      description: Why the provider is unavailable
+    error_code:
+      type: string
+      nullable: true
+      description: Machine readable reason, one of LLM_AUTH_FAILED (key rejected),
+        LLM_UNAVAILABLE (can't be reached or timed out), LLM_RATE_LIMITED (rate
+        limited or out of quota), LLM_MODEL_NOT_FOUND, LLM_BAD_RESPONSE
+    models:
+      type: array
+      description: Models that can be picked. With <PROVIDER>_MODELS=* this is
+        everything the provider lists. Otherwise it is the configured names the
+        provider actually offers. Hosted providers give only the name, Ollama
+        adds size_gb, quantization and loaded. Fields without a value are left
+        out of the response, here and on the provider.
+      items:
+        $ref: "#/LLMModel"
+
+LLMModels:
+  type: object
+  required:
+    - default
+    - providers
+  properties:
+    default:
+      $ref: "#/LLMModelChoice"
+    providers:
+      type: array
+      description: Every enabled provider. Providers without settings, or
+        refused because they are outside the local network, are left out.
+      items:
+        $ref: "#/LLMProviderModels"
+
+LLMTestRequest:
+  type: object
+  properties:
+    provider:
+      allOf:
+        - $ref: "enums.yaml#/LLMProvider"
+      nullable: true
+      description: Defaults to the configured default provider
+    model:
+      type: string
+      nullable: true
+      description: Defaults to the provider's default model
+
+LLMTestResult:
+  type: object
+  required:
+    - provider
+    - model
+    - ok
+  properties:
+    provider:
+      $ref: "enums.yaml#/LLMProvider"
+    model:
+      type: string
+    ok:
+      type: boolean
+      description: True when the model answered a short prompt with valid JSON
+    latency_ms:
+      type: integer
+      nullable: true
+    detail:
+      type: string
+      nullable: true
+      description: The error, when ok is false
+    error_code:
+      type: string
+      nullable: true
+      description: Machine readable reason, one of LLM_AUTH_FAILED (key rejected),
+        LLM_UNAVAILABLE (can't be reached or timed out), LLM_RATE_LIMITED (rate
+        limited or out of quota), LLM_MODEL_NOT_FOUND, LLM_BAD_RESPONSE
 
 SchemaVersion:
   type: object

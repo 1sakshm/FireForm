@@ -15,10 +15,17 @@ FormFillRequest:
       description: ID of a stored input (see POST /input/text, POST /input/voice)
         whose transcript is used to fill this template. The input must have
         status "ready".
+    provider:
+      allOf:
+        - $ref: "enums.yaml#/LLMProvider"
+      nullable: true
+      description: LLM provider to fill with. Must be one GET /system/llm/models
+        lists. Defaults to the configured default provider.
     model:
       type: string
       nullable: true
-      description: Ollama model override. Defaults to the configured default model.
+      description: Model to fill with. Must be one GET /system/llm/models lists
+        under the chosen provider. Defaults to that provider's default model.
 
 FormFillResponse:
   type: object
@@ -56,10 +63,17 @@ AsyncFormFillRequest:
       description: ID of a stored input (see POST /input/text, POST /input/voice)
         whose transcript is used to fill each template. The input must have
         status "ready".
+    provider:
+      allOf:
+        - $ref: "enums.yaml#/LLMProvider"
+      nullable: true
+      description: LLM provider to fill with. Must be one GET /system/llm/models
+        lists. Defaults to the configured default provider.
     model:
       type: string
       nullable: true
-      description: Ollama model override. Defaults to the configured default model.
+      description: Model to fill with. Must be one GET /system/llm/models lists
+        under the chosen provider. Defaults to that provider's default model.
 
 AsyncFormFillResponse:
   type: object

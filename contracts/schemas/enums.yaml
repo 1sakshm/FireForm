@@ -92,7 +92,7 @@ LLMProvider:
     - gemini
     - anthropic
     - custom
-  description: Which LLM fills the forms. custom is any OpenAI compatible server
+  description: An LLM provider that can fill forms. custom is any OpenAI compatible server
 
 # OutputFormat:
 #   type: string
