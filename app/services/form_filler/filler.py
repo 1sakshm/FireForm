@@ -2,8 +2,8 @@
 
     result = filler.fill("ics_201.pdf", narrative, "ics_201_filled.pdf")
 
-Which LLM answers is set in app.core.config (LLM_PROVIDER and friends), see
-app/services/llm.
+Which LLM answers is picked per call (provider, model), defaulting to
+LLM_PROVIDER and LLM_MODEL. See app/services/llm.
 
 fill() builds the schema (template.py), sends prompt.txt + narrative + schema
 to the LLM, maps the answer back to widget names and writes the filled PDF.
@@ -24,7 +24,7 @@ with open(os.path.join(os.path.dirname(__file__), "prompt.txt"), "r") as f:
     PROMPT = f.read()
 
 
-def fill(pdf_path, narrative, out_path=None, model=None, description=""):
+def fill(pdf_path, narrative, out_path=None, model=None, description="", provider=None):
     """Fill pdf_path from the narrative. Writes the PDF when out_path is given.
 
     Returns {schema, tables, groups, prompt, response_text, values}: the
@@ -35,7 +35,7 @@ def fill(pdf_path, narrative, out_path=None, model=None, description=""):
     strip_empty_descriptions(schema["properties"])
 
     prompt = build_prompt(narrative, schema, description)
-    response_text = call_model(prompt, schema, model)
+    response_text = call_model(prompt, schema, model, provider)
 
     # Tables come back as arrays of rows; map them to widget names
     values = template.expand_output(json.loads(response_text), tables, groups)
@@ -76,9 +76,9 @@ def build_prompt(narrative, schema, description=""):
     return PROMPT.rstrip() + "\n\n" + user_content
 
 
-def call_model(prompt, schema, model=None):
-    """The answer as JSON text shaped by the schema. model=None uses the configured one."""
-    return llm.get_llm().generate_json(prompt, schema, model)
+def call_model(prompt, schema, model=None, provider=None):
+    """The answer as JSON text shaped by the schema. None falls back to the defaults."""
+    return llm.get_registry().generate_json(prompt, schema, provider, model)
 
 
 def write_pdf(pdf_path, values, out_path):

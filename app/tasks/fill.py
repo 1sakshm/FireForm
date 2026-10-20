@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.api.schemas.enums import JobStatus
 from app.core.celery import celery_app
+from app.core.errors.base import AppError
 from app.db.database import get_session
 from app.db.repositories import get_job_by_celery_id, get_template, update_job
 from app.services.form import FormService
@@ -13,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="fill_form")
-def fill_form_task(self, template_id: int, input_text: str, input_id_str: str, model: str | None = None):
+def fill_form_task(
+    self, template_id: int, input_text: str, input_id_str: str, model: str | None = None, provider: str | None = None
+):
     session = next(get_session())
     try:
         job = get_job_by_celery_id(session, self.request.id)
@@ -30,7 +33,7 @@ def fill_form_task(self, template_id: int, input_text: str, input_id_str: str, m
             raise ValueError(f"Template {template_id} not found")
 
         submission = FormService().fill_and_persist(
-            session, template, input_text, UUID(input_id_str), model
+            session, template, input_text, UUID(input_id_str), model, provider
         )
 
         job.status = JobStatus.completed
@@ -44,11 +47,16 @@ def fill_form_task(self, template_id: int, input_text: str, input_id_str: str, m
         return {"job_id": job.job_id, "result_url": job.result_url}
 
     except Exception as e:
-        logger.exception("fill_form_task failed")
+        if isinstance(e, AppError):
+            logger.error("fill_form_task %s failed with %s: %s", self.request.id, e.error_code, e.message)
+            error = {"error_code": e.error_code, "message": e.message}
+        else:
+            logger.exception("fill_form_task %s failed", self.request.id)
+            error = {"error_code": "TASK_FAILED", "message": str(e)}
         job = get_job_by_celery_id(session, self.request.id)
         if job:
             job.status = JobStatus.failed
-            job.error = {"error_code": "TASK_FAILED", "message": str(e)}
+            job.error = error
             job.updated_at = datetime.now(timezone.utc)
             update_job(session, job)
         raise

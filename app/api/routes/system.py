@@ -44,7 +44,12 @@ def _check_database() -> ComponentHealth:
 
 
 def _check_llm() -> ComponentHealth:
-    health = ComponentHealth(**asdict(llm.get_llm().health()))
+    """Health of the default provider. GET /system/llm/models covers the rest."""
+    try:
+        registry = llm.get_registry()
+    except llm.LLMConfigError as exc:
+        return ComponentHealth(status=HealthState.unhealthy, detail=exc.message)
+    health = ComponentHealth(**asdict(registry.client(registry.default.provider).health()))
     if health.status == HealthState.healthy and (health.response_time_ms or 0) > _SLOW_MS:
         health.status = HealthState.degraded
     return health

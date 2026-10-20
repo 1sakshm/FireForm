@@ -1,9 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.api.schemas.enums import HealthState, LLMProvider
 
 
 class ModelInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     name: str
     size_gb: float | None = None
     quantization: str | None = None
@@ -39,6 +41,45 @@ class HealthStatus(BaseModel):
     version: str
     uptime_seconds: int | None = None
     components: HealthComponents | None = None
+
+
+class LLMModelChoice(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    model: str
+
+
+class LLMProviderModels(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    available: bool
+    default_model: str | None = None
+    detail: str | None = None
+    error_code: str | None = None
+    models: list[ModelInfo]
+
+
+class LLMModels(BaseModel):
+    default: LLMModelChoice
+    providers: list[LLMProviderModels]
+
+
+class LLMTestRequest(BaseModel):
+    provider: LLMProvider | None = None
+    model: str | None = None
+
+
+class LLMTestResult(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    model: str
+    ok: bool
+    latency_ms: int | None = None
+    detail: str | None = None
+    error_code: str | None = None
 
 
 class SchemaVersion(BaseModel):
