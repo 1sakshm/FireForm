@@ -11,6 +11,7 @@ It is an open-source, agnostic system built to solve administrative overhead for
 - [DEPLOYMENT](DEPLOYMENT.md): Step-by-step guide to getting FireForm running.
 - [DATABASE](DATABASE.md): Information on database setup and management.
 - [DOCKER](DOCKER.md): Detailed guide on using Docker and Docker Compose.
+- [MULTI LLM SUPPORT](multi-llm-support/README.md): Use Ollama, OpenAI, Gemini, Anthropic or a custom server side by side.
 - [CONTRIBUTING](CONTRIBUTING.md): How you can help improve FireForm.
 - [SETUP](1.%20SETUP.md): Local development setup guide.
 - [PROJECT STRUCTURE](2.%20PROJECT_STRUCTURE.md): How the codebase is organized.
