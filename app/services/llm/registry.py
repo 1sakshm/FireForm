@@ -16,10 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from app.api.schemas.enums import LLMProvider
-from app.services.llm.base import LLM, ModelInfo
+from app.services.llm.base import DownloadableModelInfo, LLM, ModelInfo
 from app.services.llm.errors import LLMError, LLMNotAvailableError
 from app.services.llm.factory import create_llm
 from app.services.llm.settings import LLMSettings, ProviderSettings
+from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ProviderCatalog:
     error_code: str | None = None
     # Names in <PREFIX>_MODELS the provider doesn't offer, left out of models
     missing: tuple[str, ...] = ()
+    downloadable: tuple[DownloadableModelInfo, ...] = ()
     error: LLMError | None = field(default=None, compare=False, repr=False)
 
     def offers(self, model: str) -> bool:
@@ -165,13 +167,52 @@ class LLMRegistry:
                 error=exc,
             )
         kept, missing = settings.models.pick(offered)
+        offered_names = {m.name for m in offered}
+
+        downloadable: list[DownloadableModelInfo] = []
+        if settings.provider is LLMProvider.ollama:
+            if settings.models.wildcard:
+                candidate_names = settings.installable_models or DEFAULT_OLLAMA_INSTALLABLE_MODELS
+                downloadable = [
+                    DownloadableModelInfo(name=name, installed=False)
+                    for name in candidate_names
+                    if name not in offered_names
+                ]
+            else:
+                downloadable = [
+                    DownloadableModelInfo(name=name, installed=False)
+                    for name in missing
+                ]
+
         return ProviderCatalog(
             settings.provider,
             available=True,
             models=tuple(kept),
             default_model=settings.default_model,
             missing=tuple(missing),
+            downloadable=tuple(downloadable),
         )
+
+    def validate_pull(self, provider: LLMProvider | str | None, model: str) -> None:
+        """Validate that provider is ollama, enabled, and model is in the installable set."""
+        provider_enum = self._parse_provider(provider)
+        if provider_enum is not LLMProvider.ollama:
+            raise LLMNotAvailableError("Model pulling is only supported for Ollama.")
+        if LLMProvider.ollama not in self._clients:
+            raise LLMNotAvailableError(self._not_enabled(LLMProvider.ollama))
+
+        settings = self._settings_for(LLMProvider.ollama)
+        if settings.models.wildcard:
+            allowed = settings.installable_models or DEFAULT_OLLAMA_INSTALLABLE_MODELS
+            if model not in allowed:
+                raise LLMNotAvailableError(
+                    f"{model} cannot be pulled. With OLLAMA_MODELS=*, allowed models are: {', '.join(allowed)}."
+                )
+        else:
+            if not settings.models.allows(model):
+                raise LLMNotAvailableError(
+                    f"{model} is not in OLLAMA_MODELS. Allowed: {', '.join(settings.models.names)}."
+                )
 
     def _settings_for(self, provider: LLMProvider) -> ProviderSettings:
         try:

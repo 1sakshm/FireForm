@@ -1,18 +1,31 @@
-"""LLM endpoints: GET /api/v1/system/llm/models, POST /api/v1/system/llm/test.
+"""LLM endpoints: GET /api/v1/system/llm/models, POST /api/v1/system/llm/test, POST /api/v1/system/llm/pull.
 
 Contract: contracts/path/system.yaml + contracts/schemas/system.yaml
 """
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
-from app.api.schemas.system import LLMModelChoice, LLMModels, LLMProviderModels, LLMTestRequest, LLMTestResult
+from app.api.schemas.enums import LLMProvider
+from app.api.schemas.system import (
+    DownloadableModel,
+    LLMModelChoice,
+    LLMModels,
+    LLMProviderModels,
+    LLMPullRequest,
+    LLMTestRequest,
+    LLMTestResult,
+    ModelInfo,
+)
 from app.services import llm
+from app.services.llm.errors import LLMNotAvailableError
+from app.services.llm.ollama import OllamaLLM
 
 router = APIRouter(prefix="/system/llm", tags=["system"])
 
 
 # Fields without a value are left out: hosted providers only give a model name,
-# Ollama adds size, quantization and whether the model is loaded.
+# Ollama adds size, quantization, whether the model is loaded, and downloadable models.
 @router.get(
     "/models",
     response_model=LLMModels,
@@ -21,9 +34,27 @@ router = APIRouter(prefix="/system/llm", tags=["system"])
 )
 def list_llm_models(refresh: bool = False):
     registry = llm.get_registry()
+    providers: list[LLMProviderModels] = []
+    for c in registry.catalog(refresh):
+        downloadable = (
+            [DownloadableModel.model_validate(d) for d in c.downloadable]
+            if c.downloadable
+            else None
+        )
+        providers.append(
+            LLMProviderModels(
+                provider=c.provider,
+                available=c.available,
+                default_model=c.default_model,
+                detail=c.detail,
+                error_code=c.error_code,
+                models=[ModelInfo.model_validate(m) for m in c.models],
+                downloadable=downloadable,
+            )
+        )
     return LLMModels(
         default=LLMModelChoice.model_validate(registry.default),
-        providers=[LLMProviderModels.model_validate(c) for c in registry.catalog(refresh)],
+        providers=providers,
     )
 
 
@@ -37,3 +68,29 @@ def test_llm_model(body: LLMTestRequest | None = None):
     body = body or LLMTestRequest()
     check = llm.ModelValidator(llm.get_registry()).probe(body.provider, body.model)
     return LLMTestResult.model_validate(check)
+
+
+@router.post(
+    "/pull",
+    response_class=StreamingResponse,
+    responses={
+        200: {"content": {"application/x-ndjson": {}}},
+        422: {"description": "Invalid pull request or model not installable"},
+        503: {"description": "Ollama service unavailable"},
+    },
+    summary="Pull an AI model from Ollama",
+)
+def pull_llm_model(req: LLMPullRequest):
+    registry = llm.get_registry()
+    provider_val = req.provider or "ollama"
+    registry.validate_pull(provider_val, req.model)
+
+    client = registry.client(LLMProvider.ollama)
+    if not isinstance(client, OllamaLLM):
+        raise LLMNotAvailableError("Model pulling is only supported for Ollama.")
+
+    stream = client.pull_model(
+        req.model,
+        on_success=lambda: registry.provider_catalog(LLMProvider.ollama, refresh=True),
+    )
+    return StreamingResponse(stream, media_type="application/x-ndjson")

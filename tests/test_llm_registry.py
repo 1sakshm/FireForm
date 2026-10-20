@@ -320,18 +320,27 @@ def ollama_offers(test_llm, monkeypatch):
 class TestLLMEndpoints:
 
     def test_list_models(self, client, ollama_offers):
+        # qwen2.5:1.5b is offered, so it won't appear in downloadable.
+        # qwen2.5:3b, qwen2.5:7b and llama3.2:3b are in the default installable set
+        # but not offered → they appear in downloadable.
         ollama_offers("qwen2.5:1.5b", "llama3:8b")
         resp = client.get(f"{API_PREFIX}/system/llm/models")
         assert resp.status_code == 200
-        assert resp.json() == {
-            "default": {"provider": "ollama", "model": "qwen2.5:1.5b"},
-            "providers": [{
-                "provider": "ollama",
-                "available": True,
-                "default_model": "qwen2.5:1.5b",
-                "models": [{"name": "qwen2.5:1.5b"}, {"name": "llama3:8b"}],
-            }],
-        }
+        body = resp.json()
+        assert body["default"] == {"provider": "ollama", "model": "qwen2.5:1.5b"}
+        assert len(body["providers"]) == 1
+        provider = body["providers"][0]
+        assert provider["provider"] == "ollama"
+        assert provider["available"] is True
+        assert provider["default_model"] == "qwen2.5:1.5b"
+        # Model names must match; extra null fields (size_gb, etc.) are fine
+        assert [m["name"] for m in provider["models"]] == ["qwen2.5:1.5b", "llama3:8b"]
+        # Downloadable: default installable set minus what Ollama already has
+        assert provider["downloadable"] == [
+            {"name": "qwen2.5:3b", "installed": False},
+            {"name": "qwen2.5:7b", "installed": False},
+            {"name": "llama3.2:3b", "installed": False},
+        ]
 
     def test_list_models_provider_down(self, client, monkeypatch):
         import requests

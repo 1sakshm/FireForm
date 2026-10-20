@@ -14,7 +14,7 @@ The settings are read in settings.py, the registry lives in registry.py.
 from functools import lru_cache
 
 from app.api.schemas.enums import LLMProvider
-from app.services.llm.base import LLM, LLMHealth, ModelInfo
+from app.services.llm.base import DownloadableModelInfo, LLM, LLMHealth, ModelInfo
 from app.services.llm.errors import (
     LLMAuthError,
     LLMConfigError,
@@ -38,6 +38,7 @@ def get_registry() -> LLMRegistry:
 
 
 __all__ = [
+    "DownloadableModelInfo",
     "LLM",
     "LLMAuthError",
     "LLMConfigError",

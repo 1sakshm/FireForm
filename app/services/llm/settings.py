@@ -16,7 +16,7 @@ from app.api.schemas.enums import LLMProvider
 from app.core import config
 from app.services.llm.errors import LLMConfigError
 from app.services.llm.selection import ModelSelection
-from app.services.llm.specs import SPECS, ProviderSpec
+from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS, SPECS, ProviderSpec
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class ProviderSettings:
     default_model: str | None
     api_key: str = ""
     timeout: int = 300
+    pull_timeout: int = 120
+    installable_models: tuple[str, ...] = ()
     max_retries: int = 3
     temperature: float | None = None
     structured_output: bool = True
@@ -133,6 +135,20 @@ def _load_provider(
             "Set LLM_ALLOW_EXTERNAL=true to allow it."
         )
 
+    pull_timeout = 120
+    installable_models = ()
+    if spec.provider is LLMProvider.ollama:
+        pull_timeout = _parse_int(
+            "OLLAMA_PULL_TIMEOUT",
+            str(getattr(cfg, "OLLAMA_PULL_TIMEOUT", 120)),
+            120,
+        ) or 120
+        installable_raw = getattr(cfg, "OLLAMA_INSTALLABLE_MODELS", "") or env.get("INSTALLABLE_MODELS", "")
+        if installable_raw:
+            installable_models = tuple(dict.fromkeys(n.strip() for n in installable_raw.split(",") if n.strip()))
+        else:
+            installable_models = DEFAULT_OLLAMA_INSTALLABLE_MODELS
+
     return ProviderSettings(
         spec=spec,
         base_url=base_url,
@@ -140,6 +156,8 @@ def _load_provider(
         default_model=_default_model(spec, models, cfg, is_default),
         api_key=api_key,
         timeout=shared.timeout,
+        pull_timeout=pull_timeout,
+        installable_models=installable_models,
         max_retries=shared.max_retries,
         temperature=shared.temperature,
         structured_output=_parse_bool(
