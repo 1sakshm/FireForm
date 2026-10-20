@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.api.deps import get_db
+from app.api.schemas.enums import LLMProvider
 from app.main import app
 from app.models import (  # noqa: F401 — registers tables
     Extraction,
@@ -24,7 +25,10 @@ from app.models import (  # noqa: F401 — registers tables
     Report,
     Template,
 )
+from app.services.llm import LLMRegistry, LLMSettings, ProviderSettings
 from app.services.llm.ollama import OllamaLLM
+from app.services.llm.selection import ModelSelection
+from app.services.llm.specs import SPECS
 
 # ---------------------------------------------------------------------------
 # In-memory database
@@ -53,12 +57,32 @@ def _reset_tables():
 
 
 @pytest.fixture(autouse=True)
-def test_llm(monkeypatch):
-    """Pin the LLM to a plain Ollama so tests don't depend on the LLM_* settings
-    in the developer's .env. Nothing is sent: tests mock requests or the filler."""
-    llm = OllamaLLM(host="http://ollama:11434", model="qwen2.5:1.5b", timeout=5)
-    monkeypatch.setattr("app.services.llm.get_llm", lambda: llm)
-    return llm
+def test_registry(monkeypatch):
+    """Pin the LLMs to one plain Ollama listing every model, so tests don't
+    depend on the LLM settings in the developer's .env. Nothing is sent: tests
+    mock requests or the filler."""
+    ollama = SPECS[LLMProvider.ollama]
+    settings = LLMSettings(
+        providers={
+            LLMProvider.ollama: ProviderSettings(
+                spec=ollama,
+                base_url="http://ollama:11434",
+                models=ModelSelection(wildcard=True),
+                default_model="qwen2.5:1.5b",
+                timeout=5,
+            ),
+        },
+        default_provider=LLMProvider.ollama,
+    )
+    registry = LLMRegistry(settings, {LLMProvider.ollama: OllamaLLM("http://ollama:11434", "qwen2.5:1.5b", 5)})
+    monkeypatch.setattr("app.services.llm.get_registry", lambda: registry)
+    return registry
+
+
+@pytest.fixture
+def test_llm(test_registry):
+    """The Ollama client behind test_registry."""
+    return test_registry.client(LLMProvider.ollama)
 
 
 @pytest.fixture

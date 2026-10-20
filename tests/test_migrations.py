@@ -118,6 +118,7 @@ def test_job_columns(alembic_cfg, alembic_engine):
         "progress_percent",
         "result_url",
         "error",
+        "provider",
         "model",
         "created_at",
         "updated_at",
@@ -322,7 +323,7 @@ def test_downgrade_002(alembic_cfg, alembic_engine):
 def test_downgrade_003(alembic_cfg, alembic_engine):
     """Downgrading from head to 003 removes only the template description."""
     command.upgrade(alembic_cfg, "head")
-    command.downgrade(alembic_cfg, "-1")
+    command.downgrade(alembic_cfg, "003")
 
     inspector = inspect(alembic_engine)
 
@@ -335,6 +336,16 @@ def test_downgrade_003(alembic_cfg, alembic_engine):
         c["name"] for c in inspector.get_columns("formsubmission")
     }
     assert "input_id" in formsubmission_columns
+
+
+def test_downgrade_004(alembic_cfg, alembic_engine):
+    """Downgrading from head to 004 removes only the job provider."""
+    command.upgrade(alembic_cfg, "head")
+    command.downgrade(alembic_cfg, "004")
+
+    job_columns = {c["name"] for c in inspect(alembic_engine).get_columns("job")}
+    assert "provider" not in job_columns
+    assert "model" in job_columns
 
 
 def test_alembic_check_no_pending_migrations(alembic_cfg):

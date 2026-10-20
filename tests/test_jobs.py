@@ -8,6 +8,7 @@ from sqlmodel import select
 from app.api.schemas.enums import InputStatus, InputType, JobStatus
 from app.core.config import API_PREFIX
 from app.models import Input, Job
+from app.services.llm import ModelInfo
 
 
 class TestJobEndpoints:
@@ -61,9 +62,11 @@ class TestJobEndpoints:
         assert "job_id" in data["jobs"][0]
         assert data["jobs"][0]["poll_url"].startswith(f"{API_PREFIX}/jobs/")
         mock_task.apply_async.assert_called_once_with(
-            (tpl_id, "John Doe firefighter", str(input_id), None),
+            (tpl_id, "John Doe firefighter", str(input_id), "qwen2.5:1.5b", "ollama"),
             task_id=data["jobs"][0]["job_id"],
         )
+        job = db.exec(select(Job)).one()
+        assert (job.provider, job.model) == ("ollama", "qwen2.5:1.5b")
 
     @patch("app.api.routes.jobs.fill_form_task")
     def test_submit_async_batch(self, mock_task, client, db):
@@ -155,7 +158,8 @@ class TestJobEndpoints:
         assert resp.status_code == 404
 
     @patch("app.api.routes.jobs.fill_form_task")
-    def test_submit_with_model_override(self, mock_task, client, db):
+    def test_submit_with_model_override(self, mock_task, client, db, test_llm, monkeypatch):
+        monkeypatch.setattr(test_llm, "list_models", lambda: [ModelInfo(name="mistral:latest")])
         tpl_id = self._seed_template(client)
         input_id = self._seed_input(db, transcript="test")
         resp = client.post(f"{API_PREFIX}/forms/jobs", json={
@@ -165,7 +169,7 @@ class TestJobEndpoints:
         })
         assert resp.status_code == 200
         mock_task.apply_async.assert_called_once_with(
-            (tpl_id, "test", str(input_id), "mistral:latest"), task_id=ANY
+            (tpl_id, "test", str(input_id), "mistral:latest", "ollama"), task_id=ANY
         )
 
     def test_submit_empty_template_ids(self, client, db):

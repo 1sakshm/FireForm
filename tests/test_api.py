@@ -425,8 +425,11 @@ class TestFormEndpoints:
         assert resp.status_code == 200
         assert resp.json()["models"] == ["qwen2.5:1.5b"]
 
-    def test_fill_form_passes_model_override(self, client, mock_controller, db, tmp_path, monkeypatch):
+    def test_fill_form_passes_model_override(self, client, mock_controller, db, tmp_path, monkeypatch, test_llm):
         """A `model` in the request reaches filler.fill as a keyword argument."""
+        from app.services.llm import ModelInfo
+
+        monkeypatch.setattr(test_llm, "list_models", lambda: [ModelInfo(name="qwen2.5:3b")])
         monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
         pdf_file = tmp_path / "employee.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake")
