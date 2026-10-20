@@ -15,6 +15,7 @@ from app.api.schemas.forms import (
 from app.core.errors.base import AppError
 from app.db.repositories import create_job, get_job_by_uuid, get_template, update_job
 from app.models import Job
+from app.services import llm
 from app.services.input import InputService
 from app.tasks.fill import fill_form_task
 
@@ -45,6 +46,8 @@ def submit_async_form_fill(form: AsyncFormFill, db: Session = Depends(get_db)):
             raise AppError(f"Template {tid} not found", status_code=404)
 
     transcript = InputService().resolve_transcript(db, form.input_id)
+    # Checked here so a bad pick fails the request, not every queued job
+    choice = llm.get_registry().resolve(form.provider, form.model)
 
     jobs: list[AsyncJobSubmitResponse] = []
     for tid in form.template_ids:
@@ -56,13 +59,15 @@ def submit_async_form_fill(form: AsyncFormFill, db: Session = Depends(get_db)):
             template_id=tid,
             input_text=transcript,
             status=JobStatus.queued,
-            model=form.model,
+            provider=choice.provider,
+            model=choice.model,
         )
         job.celery_task_id = job.job_id
         job = create_job(db, job)
         try:
             fill_form_task.apply_async(
-                (tid, transcript, str(form.input_id), form.model), task_id=job.celery_task_id
+                (tid, transcript, str(form.input_id), choice.model, choice.provider.value),
+                task_id=job.celery_task_id,
             )
         except Exception as e:
             # Broker unreachable: mark this job row as failed so it is never

@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlmodel import Session
 
+from app.api.schemas.enums import LLMProvider
 from app.core import paths
 from app.core.errors.base import AppError
 from app.db.repositories import (
@@ -15,6 +16,7 @@ from app.db.repositories import (
     get_submissions_with_template,
 )
 from app.models import FormSubmission, Template
+from app.services import llm
 from app.services.form_filler import filler
 from app.services.input import InputService
 
@@ -40,8 +42,11 @@ class FormService:
         template: Template,
         input_id: UUID | None = None,
         input_text: str | None = None,
+        provider: LLMProvider | None = None,
         model: str | None = None,
     ) -> FormSubmission:
+        # Before anything is stored, so a bad pick leaves no stray input behind
+        choice = llm.get_registry().resolve(provider, model)
         if input_id is not None and not input_text:
             transcript = self.input_service.resolve_transcript(session, input_id)
         elif input_text:
@@ -62,7 +67,7 @@ class FormService:
                 input_id = input_record.input_id
         else:
             raise AppError("Either input_id or input_text is required", status_code=422, error_code="VALIDATION_ERROR")
-        return self.fill_and_persist(session, template, transcript, input_id, model)
+        return self.fill_and_persist(session, template, transcript, input_id, choice.model, choice.provider)
 
     def fill_and_persist(
         self,
@@ -71,6 +76,7 @@ class FormService:
         transcript: str,
         input_id: UUID,
         model: str | None = None,
+        provider: LLMProvider | None = None,
     ) -> FormSubmission:
         resolved_pdf = paths._resolve_project_file(template.pdf_path)
         if not resolved_pdf.exists():
@@ -84,6 +90,7 @@ class FormService:
             pdf_path=str(resolved_pdf),
             narrative=transcript,
             out_path=str(out_target),
+            provider=provider,
             model=model,
             description=template.description,
         )

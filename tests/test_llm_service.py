@@ -1,0 +1,520 @@
+"""Tests for app.services.llm: settings, both LLM classes, JSON parsing.
+
+Nothing here reaches a real server. Ollama is faked at requests.request and the
+OpenAI compatible class at its SDK client. The registry and validator have
+their own file, test_llm_registry.py.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import httpx
+import openai
+import pytest
+import requests
+
+from app.services.llm import (
+    LLMAuthError,
+    LLMConfigError,
+    LLMModelNotFoundError,
+    LLMProvider,
+    LLMRateLimitError,
+    LLMResponseError,
+    LLMUnavailableError,
+    create_llm,
+    load_settings,
+)
+from app.services.llm.base import parse_json_object
+from app.services.llm.ollama import OPTIONS, OllamaLLM
+from app.services.llm.openai_compatible import OpenAICompatibleLLM
+from app.services.llm.settings import is_local_url
+
+SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+LOCAL_URL = "http://local-llm:8000/v1"
+
+
+def _cfg(providers: dict | None = None, **overrides):
+    """Config with every LLM setting at its default, plus overrides.
+
+    providers maps a provider name to its <PREFIX>_* settings without the
+    prefix, such as {"gemini": {"API_KEY": "k", "MODELS": "g"}}.
+    """
+    env = {"ollama": {"BASE_URL": "http://ollama:11434", "MODELS": "*"}}
+    for name, values in (providers or {}).items():
+        env[name] = {**env.get(name, {}), **values}
+    values = {
+        "OLLAMA_MODEL": "qwen2.5:1.5b",
+        "OLLAMA_TIMEOUT": 300,
+        "LLM_PROVIDER": "ollama",
+        "LLM_MODEL": "",
+        "LLM_TIMEOUT": "",
+        "LLM_MAX_RETRIES": "",
+        "LLM_ALLOW_EXTERNAL": "false",
+        "LLM_TEMPERATURE": "0",
+        "LLM_PROVIDER_ENV": env,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _only(provider: str, settings: dict, **overrides):
+    """Config with one provider as the default and Ollama off."""
+    return _cfg({"ollama": {"MODELS": ""}, provider: settings}, LLM_PROVIDER=provider, **overrides)
+
+
+# ---------------------------------------------------------------------------
+# settings.load_settings + factory.create_llm
+# ---------------------------------------------------------------------------
+
+class TestLoadSettings:
+
+    def test_default_is_ollama_listing_every_model(self):
+        settings = load_settings(_cfg())
+        assert list(settings.providers) == [LLMProvider.ollama]
+        assert settings.default_provider is LLMProvider.ollama
+        assert settings.default_model == "qwen2.5:1.5b"
+        ollama = settings.providers[LLMProvider.ollama]
+        assert ollama.models.wildcard
+        assert ollama.timeout == 300
+        assert settings.warnings == ()
+
+        llm = create_llm(ollama)
+        assert isinstance(llm, OllamaLLM)
+        assert llm.host == "http://ollama:11434"
+        assert llm.model == "qwen2.5:1.5b"
+
+    def test_llm_model_and_timeout_override(self):
+        settings = load_settings(_cfg(LLM_MODEL="llama3:8b", LLM_TIMEOUT="60"))
+        assert settings.default_model == "llama3:8b"
+        assert settings.providers[LLMProvider.ollama].timeout == 60
+
+    @pytest.mark.parametrize("provider", list(LLMProvider))
+    def test_every_provider_builds(self, provider):
+        """Catches an enum value added without a row in SPECS."""
+        settings = load_settings(_only(provider.value, {"BASE_URL": LOCAL_URL, "API_KEY": "k", "MODELS": "m"}))
+        assert settings.default_provider is provider
+        assert create_llm(settings.providers[provider]).provider is provider
+
+    def test_several_providers_side_by_side(self):
+        settings = load_settings(_cfg(
+            {"gemini": {"API_KEY": "gk", "MODELS": "g1,g2"}, "custom": {"BASE_URL": LOCAL_URL, "MODELS": "*"}},
+            LLM_ALLOW_EXTERNAL="true",
+        ))
+        assert set(settings.providers) == {LLMProvider.ollama, LLMProvider.gemini, LLMProvider.custom}
+        assert settings.default_provider is LLMProvider.ollama
+        assert settings.providers[LLMProvider.gemini].default_model == "g1"
+        assert settings.providers[LLMProvider.custom].default_model is None
+
+    def test_provider_without_models_is_off(self):
+        settings = load_settings(_cfg({"openai": {"MODELS": ""}}))
+        assert LLMProvider.openai not in settings.providers
+        assert settings.warnings == ()
+
+    def test_key_without_models_warns(self):
+        settings = load_settings(_cfg({"openai": {"API_KEY": "k"}}))
+        assert LLMProvider.openai not in settings.providers
+        assert any("OPENAI_MODELS is empty" in w for w in settings.warnings)
+
+    def test_unknown_provider(self):
+        with pytest.raises(LLMConfigError, match="LLM_PROVIDER='mystery'"):
+            load_settings(_cfg(LLM_PROVIDER="mystery"))
+
+    def test_default_provider_must_be_on(self):
+        with pytest.raises(LLMConfigError, match="GEMINI_MODELS is empty") as info:
+            load_settings(_cfg(LLM_PROVIDER="gemini", LLM_MODEL="g"))
+        assert "Add GEMINI_MODELS=g" in info.value.message
+
+    def test_default_key_without_models_suggests_the_fix(self):
+        """The case that used to crash startup with no hint."""
+        cfg = _only("gemini", {"API_KEY": "k"}, LLM_MODEL="gemini-3.8-flash-lite", LLM_ALLOW_EXTERNAL="true")
+        with pytest.raises(LLMConfigError) as info:
+            load_settings(cfg)
+        assert info.value.message == (
+            "GEMINI_API_KEY is set but GEMINI_MODELS is empty. Add GEMINI_MODELS=gemini-3.8-flash-lite, "
+            "a comma separated list, or * for every model gemini lists."
+        )
+
+    def test_ollama_can_be_off(self):
+        settings = load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "qwen"}))
+        assert list(settings.providers) == [LLMProvider.custom]
+
+    def test_mistake_in_default_provider_stops_startup(self):
+        with pytest.raises(LLMConfigError, match="GEMINI_API_KEY is needed"):
+            load_settings(_only("gemini", {"MODELS": "g"}, LLM_ALLOW_EXTERNAL="true"))
+
+    def test_mistake_in_other_provider_turns_it_off(self):
+        settings = load_settings(_cfg({"gemini": {"MODELS": "g"}}, LLM_ALLOW_EXTERNAL="true"))
+        assert LLMProvider.gemini not in settings.providers
+        assert settings.warnings == (
+            "gemini is off: GEMINI_API_KEY is needed. Add it, or empty GEMINI_MODELS to turn gemini off.",
+        )
+
+    def test_custom_needs_base_url(self):
+        with pytest.raises(LLMConfigError, match="CUSTOM_BASE_URL is needed"):
+            load_settings(_only("custom", {"MODELS": "m"}))
+
+    def test_custom_on_local_network_needs_no_key_or_flag(self):
+        settings = load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "qwen"}))
+        llm = create_llm(settings.providers[LLMProvider.custom])
+        assert isinstance(llm, OpenAICompatibleLLM)
+        assert llm.structured_output is True
+        assert llm.model == "qwen"
+
+    def test_external_refused_without_flag(self):
+        with pytest.raises(LLMConfigError, match="LLM_ALLOW_EXTERNAL"):
+            load_settings(_only("openai", {"API_KEY": "k", "MODELS": "o"}))
+
+    def test_external_non_default_refused_with_warning(self):
+        settings = load_settings(_cfg({"openai": {"API_KEY": "k", "MODELS": "o"}}))
+        assert LLMProvider.openai not in settings.providers
+        assert "LLM_ALLOW_EXTERNAL" in settings.warnings[0]
+
+    def test_external_custom_refused_without_flag(self):
+        with pytest.raises(LLMConfigError, match="LLM_ALLOW_EXTERNAL"):
+            load_settings(_only("custom", {"BASE_URL": "https://api.groq.com/openai/v1", "MODELS": "m"}))
+
+    def test_llm_model_must_be_in_the_list(self):
+        with pytest.raises(LLMConfigError, match="LLM_MODEL=other is not in CUSTOM_MODELS"):
+            load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "a,b"}, LLM_MODEL="other"))
+
+    def test_wildcard_default_needs_llm_model(self):
+        with pytest.raises(LLMConfigError, match="Set LLM_MODEL"):
+            load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "*"}))
+        settings = load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "*"}, LLM_MODEL="any"))
+        assert settings.default_model == "any"
+
+    def test_ollama_model_outside_list_falls_back_to_first(self):
+        settings = load_settings(_cfg({"ollama": {"MODELS": "llama3:8b,mistral:7b"}}))
+        assert settings.default_model == "llama3:8b"
+
+    def test_hosted_preset_url_and_key(self):
+        settings = load_settings(_only("gemini", {"API_KEY": "gk", "MODELS": "g"}, LLM_ALLOW_EXTERNAL="true"))
+        llm = create_llm(settings.providers[LLMProvider.gemini])
+        assert llm.base_url.startswith("https://generativelanguage.googleapis.com")
+        assert llm.client.api_key == "gk"
+        assert llm.temperature == 0.0
+        assert llm.max_tokens is None
+
+    def test_gemini_ids_lose_their_prefix(self):
+        settings = load_settings(_only("gemini", {"API_KEY": "gk", "MODELS": "g"}, LLM_ALLOW_EXTERNAL="true"))
+        llm = create_llm(settings.providers[LLMProvider.gemini])
+        llm.client = MagicMock()
+        llm.client.with_options.return_value.models.list.return_value = [
+            SimpleNamespace(id="models/gemini-2.5-flash"), SimpleNamespace(id="gemini-3.8-flash"),
+        ]
+        assert [m.name for m in llm.list_models()] == ["gemini-2.5-flash", "gemini-3.8-flash"]
+
+    def test_anthropic_sends_version_header(self):
+        settings = load_settings(_only("anthropic", {"API_KEY": "ak", "MODELS": "c"}, LLM_ALLOW_EXTERNAL="true"))
+        llm = create_llm(settings.providers[LLMProvider.anthropic])
+        assert llm.client.default_headers["anthropic-version"] == "2023-06-01"
+
+    def test_anthropic_preset_defaults_and_overrides(self):
+        base = {"API_KEY": "ak", "MODELS": "c"}
+        settings = load_settings(_only("anthropic", base, LLM_ALLOW_EXTERNAL="true"))
+        anthropic = settings.providers[LLMProvider.anthropic]
+        assert anthropic.structured_output is False
+        assert anthropic.max_tokens == 12288
+
+        overrides = {**base, "STRUCTURED_OUTPUT": "true", "MAX_TOKENS": "4000"}
+        settings = load_settings(_only("anthropic", overrides, LLM_ALLOW_EXTERNAL="true"))
+        anthropic = settings.providers[LLMProvider.anthropic]
+        assert anthropic.structured_output is True
+        assert anthropic.max_tokens == 4000
+
+    def test_empty_temperature_sends_none(self):
+        settings = load_settings(_only("custom", {"BASE_URL": LOCAL_URL, "MODELS": "m"}, LLM_TEMPERATURE=""))
+        assert settings.providers[LLMProvider.custom].temperature is None
+
+    @pytest.mark.parametrize("setting, value", [
+        ("LLM_TIMEOUT", "soon"),
+        ("LLM_TEMPERATURE", "warm"),
+        ("LLM_ALLOW_EXTERNAL", "sure"),
+        ("CUSTOM_MAX_TOKENS", "lots"),
+        ("CUSTOM_STRUCTURED_OUTPUT", "maybe"),
+    ])
+    def test_bad_values_name_the_setting(self, setting, value):
+        custom = {"BASE_URL": LOCAL_URL, "MODELS": "m"}
+        overrides = {}
+        if setting.startswith("CUSTOM_"):
+            custom[setting.removeprefix("CUSTOM_")] = value
+        else:
+            overrides[setting] = value
+        with pytest.raises(LLMConfigError, match=setting):
+            load_settings(_only("custom", custom, **overrides))
+
+    @pytest.mark.parametrize("url", ["vllm:8000/v1", "ftp://host", "http://"])
+    def test_bad_url(self, url):
+        with pytest.raises(LLMConfigError, match="CUSTOM_BASE_URL=.* is not a valid URL"):
+            load_settings(_only("custom", {"BASE_URL": url, "MODELS": "m"}))
+
+
+@pytest.mark.parametrize("url, local", [
+    ("http://localhost:8000/v1", True),
+    ("http://127.0.0.1:1234/v1", True),
+    ("http://192.168.1.20:8000/v1", True),
+    ("http://10.0.0.5:8000/v1", True),
+    ("http://vllm:8000/v1", True),
+    ("http://host.docker.internal:1234/v1", True),
+    ("http://gpu.local:8000/v1", True),
+    ("https://api.openai.com/v1", False),
+    ("http://8.8.8.8:8000/v1", False),
+])
+def test_is_local_url(url, local):
+    assert is_local_url(url) is local
+
+
+# ---------------------------------------------------------------------------
+# base.parse_json_object
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ('{"a": 1}', '{"a": 1}'),
+    ('  {"a": 1}\n', '{"a": 1}'),
+    ('```json\n{"a": 1}\n```', '{"a": 1}'),
+    ('Here you go: {"a": {"b": 2}} Done.', '{"a": {"b": 2}}'),
+])
+def test_parse_json_object(raw, expected):
+    assert parse_json_object(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "no json here", "[1, 2]", "{broken"])
+def test_parse_json_object_rejects(raw):
+    with pytest.raises(LLMResponseError):
+        parse_json_object(raw)
+
+
+# ---------------------------------------------------------------------------
+# OllamaLLM
+# ---------------------------------------------------------------------------
+
+def _response(status_code=200, json_data=None, text=""):
+    m = MagicMock()
+    m.status_code = status_code
+    m.json.return_value = json_data or {}
+    m.text = text
+    return m
+
+
+class TestOllamaLLM:
+
+    def _llm(self):
+        return OllamaLLM(host="http://ollama:11434/", model="qwen2.5:1.5b", timeout=300)
+
+    def test_generate_sends_schema_as_format(self, monkeypatch):
+        calls = []
+
+        def fake(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return _response(json_data={"response": '{"name": "Ana"}'})
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", fake)
+
+        assert self._llm().generate_json("prompt", SCHEMA) == '{"name": "Ana"}'
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("post", "http://ollama:11434/api/generate")
+        assert kwargs["timeout"] == 300
+        assert kwargs["json"]["format"] == SCHEMA
+        assert kwargs["json"]["model"] == "qwen2.5:1.5b"
+        assert kwargs["json"]["options"] == OPTIONS
+
+    def test_model_override_for_one_call(self, monkeypatch):
+        sent = {}
+
+        def fake(method, url, **kwargs):
+            sent.update(kwargs["json"])
+            return _response(json_data={"response": "{}"})
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", fake)
+        llm = self._llm()
+        llm.generate_json("prompt", SCHEMA, "llama3:8b")
+        assert sent["model"] == "llama3:8b"
+        assert llm.model == "qwen2.5:1.5b"
+
+    @pytest.mark.parametrize("failure, error", [
+        (requests.exceptions.ConnectionError("down"), LLMUnavailableError),
+        (requests.exceptions.ReadTimeout("slow"), LLMUnavailableError),
+        (_response(status_code=500, text="boom"), LLMUnavailableError),
+        (_response(status_code=404, json_data={"error": "model 'qwen2.5:1.5b' not found"}), LLMModelNotFoundError),
+        (_response(status_code=400, json_data={"error": "invalid format"}), LLMResponseError),
+    ])
+    def test_failures_become_llm_errors(self, monkeypatch, failure, error):
+        def fake(method, url, **kwargs):
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", fake)
+        with pytest.raises(error):
+            self._llm().generate_json("prompt", SCHEMA)
+
+    def test_killed_runner_says_out_of_memory(self, monkeypatch):
+        body = {"error": "llama-server process has terminated: signal: killed"}
+        monkeypatch.setattr(
+            "app.services.llm.ollama.requests.request",
+            lambda method, url, **kwargs: _response(status_code=500, json_data=body),
+        )
+        with pytest.raises(LLMUnavailableError, match="Ollama ran out of memory loading qwen2.5:1.5b"):
+            self._llm().generate_json("prompt", SCHEMA)
+
+    def test_health_unhealthy_when_down(self, monkeypatch):
+        def fake(method, url, **kwargs):
+            raise requests.exceptions.ConnectionError("down")
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", fake)
+        health = self._llm().health()
+        assert health.status == "unhealthy"
+        assert health.provider == "ollama"
+        assert "Could not reach Ollama" in health.detail
+
+
+# ---------------------------------------------------------------------------
+# OpenAICompatibleLLM
+# ---------------------------------------------------------------------------
+
+def _completion(content='{"name": "Ana"}', finish_reason="stop"):
+    message = SimpleNamespace(content=content)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
+
+
+def _openai_llm(**kwargs):
+    llm = OpenAICompatibleLLM(
+        provider=LLMProvider.custom, base_url="http://vllm:8000/v1", api_key="", model="qwen", timeout=60, **kwargs
+    )
+    llm.client = MagicMock()
+    llm.client.chat.completions.create.return_value = _completion()
+    return llm
+
+
+_REQUEST = httpx.Request("POST", "http://vllm:8000/v1/chat/completions")
+
+
+def _status_error(cls, code, body=None):
+    return cls("error", response=httpx.Response(code, request=_REQUEST), body=body)
+
+
+class TestOpenAICompatibleLLM:
+
+    def test_structured_output_sends_schema(self):
+        llm = _openai_llm(structured_output=True, temperature=0.0)
+        assert llm.generate_json("prompt", SCHEMA) == '{"name": "Ana"}'
+
+        kwargs = llm.client.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "qwen"
+        assert kwargs["messages"] == [{"role": "user", "content": "prompt"}]
+        assert kwargs["response_format"]["json_schema"]["schema"] == SCHEMA
+        assert kwargs["temperature"] == 0.0
+        assert "max_tokens" not in kwargs
+
+    def test_unset_options_are_not_sent(self):
+        llm = _openai_llm(structured_output=False)
+        llm.generate_json("prompt", SCHEMA)
+        kwargs = llm.client.chat.completions.create.call_args.kwargs
+        assert "response_format" not in kwargs
+        assert "temperature" not in kwargs
+        assert "max_tokens" not in kwargs
+
+    def test_max_tokens_and_model_override(self):
+        llm = _openai_llm(max_tokens=4000)
+        llm.generate_json("prompt", SCHEMA, "bigger-model")
+        kwargs = llm.client.chat.completions.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 4000
+        assert kwargs["model"] == "bigger-model"
+
+    def test_fenced_answer_is_cleaned(self):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.return_value = _completion('```json\n{"a": 1}\n```')
+        assert llm.generate_json("prompt", SCHEMA) == '{"a": 1}'
+
+    def test_cut_off_answer(self):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.return_value = _completion('{"a": ', finish_reason="length")
+        with pytest.raises(LLMResponseError, match="CUSTOM_MAX_TOKENS"):
+            llm.generate_json("prompt", SCHEMA)
+
+    def test_no_choices(self):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.return_value = SimpleNamespace(choices=[])
+        with pytest.raises(LLMResponseError):
+            llm.generate_json("prompt", SCHEMA)
+
+    @pytest.mark.parametrize("failure, error", [
+        (_status_error(openai.AuthenticationError, 401), LLMAuthError),
+        (_status_error(openai.PermissionDeniedError, 403), LLMAuthError),
+        (_status_error(openai.RateLimitError, 429), LLMRateLimitError),
+        (_status_error(openai.InternalServerError, 500), LLMUnavailableError),
+        (_status_error(openai.BadRequestError, 400), LLMResponseError),
+        (openai.APITimeoutError(request=_REQUEST), LLMUnavailableError),
+        (openai.APIConnectionError(request=_REQUEST), LLMUnavailableError),
+    ])
+    def test_sdk_errors_become_llm_errors(self, failure, error):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.side_effect = failure
+        with pytest.raises(error):
+            llm.generate_json("prompt", SCHEMA)
+
+    def test_gemini_bad_key_is_an_auth_error(self):
+        """Gemini answers a bad key with 400 and its body is a list."""
+        llm = OpenAICompatibleLLM(LLMProvider.gemini, "https://g.example/v1", "bad", "g", 60)
+        llm.client = MagicMock()
+        body = [{"error": {"code": 400, "message": "Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}]
+        llm.client.chat.completions.create.side_effect = _status_error(openai.BadRequestError, 400, body)
+        with pytest.raises(LLMAuthError) as info:
+            llm.generate_json("prompt", SCHEMA)
+        assert info.value.message == "gemini rejected the API key: Please pass a valid API key. Check GEMINI_API_KEY."
+        assert info.value.error_code == "LLM_AUTH_FAILED"
+
+    def test_missing_model_names_it(self):
+        llm = _openai_llm()
+        body = {"error": {"message": "The model `nope` does not exist"}}
+        llm.client.chat.completions.create.side_effect = _status_error(openai.NotFoundError, 404, body)
+        with pytest.raises(LLMModelNotFoundError) as info:
+            llm.generate_json("prompt", SCHEMA, "nope")
+        assert info.value.message == "custom has no model nope: The model `nope` does not exist"
+
+    def test_404_on_model_list_points_at_base_url(self):
+        llm = _openai_llm()
+        llm.client.with_options.return_value.models.list.side_effect = _status_error(openai.NotFoundError, 404)
+        with pytest.raises(LLMResponseError, match="Check CUSTOM_BASE_URL"):
+            llm.list_models()
+
+    def test_anthropic_error_body(self):
+        llm = _openai_llm()
+        body = {"type": "error", "error": {"type": "invalid_request_error", "message": "max_tokens: too large"}}
+        llm.client.chat.completions.create.side_effect = _status_error(openai.BadRequestError, 400, body)
+        with pytest.raises(LLMResponseError) as info:
+            llm.generate_json("prompt", SCHEMA)
+        assert info.value.message == "custom refused the request with 400: max_tokens: too large"
+
+    def test_non_json_answer_names_provider_and_model(self):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.return_value = _completion("sorry, no")
+        with pytest.raises(LLMResponseError, match="custom model qwen: Model did not return a JSON object"):
+            llm.generate_json("prompt", SCHEMA)
+
+    def test_errors_carry_status_codes(self):
+        llm = _openai_llm()
+        llm.client.chat.completions.create.side_effect = openai.APIConnectionError(request=_REQUEST)
+        with pytest.raises(LLMUnavailableError) as info:
+            llm.generate_json("prompt", SCHEMA)
+        assert info.value.status_code == 503
+        assert info.value.error_code == "LLM_UNAVAILABLE"
+
+    def test_list_models_and_health(self):
+        llm = _openai_llm()
+        llm.client.with_options.return_value.models.list.return_value = [SimpleNamespace(id="qwen")]
+
+        assert [m.name for m in llm.list_models()] == ["qwen"]
+        health = llm.health()
+        assert health.status == "healthy"
+        assert health.provider == "custom"
+        assert health.models_available[0].name == "qwen"
+
+    def test_health_unhealthy_when_down(self):
+        llm = _openai_llm()
+        llm.client.with_options.return_value.models.list.side_effect = openai.APIConnectionError(request=_REQUEST)
+        health = llm.health()
+        assert health.status == "unhealthy"
+        assert "Could not reach custom" in health.detail
+        assert "Check CUSTOM_BASE_URL" in health.detail

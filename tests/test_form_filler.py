@@ -1,4 +1,4 @@
-"""Tests for app.services.form_filler without Ollama.
+"""Tests for app.services.form_filler without a real LLM.
 
 Uses the real ICS 205A from the benchmark data: the template is built from the
 PDF itself, the model call is patched, and the filled PDF is read back.
@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pypdf import PdfReader
 
 from app.services.form_filler import filler, template
+from app.services.llm import ModelInfo
 
 ICS_205A = str(Path(__file__).resolve().parents[1] / "benchmark/data/pdfs/ics_205a.pdf")
 TABLE = "resource_summary_0_table"
@@ -56,13 +57,14 @@ def test_fill_maps_rows_back_to_widgets_and_writes_pdf(tmp_path):
             TEMPLATE_DESCRIPTION,
         )
 
-    prompt, schema, model = call.call_args.args
+    prompt, schema, model, provider = call.call_args.args
     assert (
         f"<template_description>\n{TEMPLATE_DESCRIPTION}\n</template_description>" in prompt
     )
     assert "<incident_narrative>\nNarrative text.\n</incident_narrative>" in prompt
     assert prompt.startswith(filler.PROMPT.rstrip())
     assert model == "test-model"
+    assert provider is None
 
     assert result["values"]["Name AlphabetizedRow2"] == "Bo Chen"
 
@@ -73,9 +75,26 @@ def test_fill_maps_rows_back_to_widgets_and_writes_pdf(tmp_path):
     assert fields["Name AlphabetizedRow3"].get("/V", "") == ""
 
 
-def test_fill_defaults_to_configured_model():
+def test_fill_without_model_lets_the_llm_pick_its_default():
     with patch.object(filler, "call_model", return_value="{}") as call:
         filler.fill(ICS_205A, "Narrative text.", description=TEMPLATE_DESCRIPTION)
 
-    assert call.call_args.args[2] == filler.OLLAMA_MODEL
+    assert call.call_args.args[2] is None
+
+
+def test_call_model_goes_through_the_picked_llm(test_llm):
+    with (
+        patch.object(test_llm, "list_models", return_value=[ModelInfo(name="m")]),
+        patch.object(test_llm, "generate_json", return_value="{}") as generate,
+    ):
+        assert filler.call_model("prompt", {"type": "object"}, "m", "ollama") == "{}"
+
+    generate.assert_called_once_with("prompt", {"type": "object"}, "m")
+
+
+def test_call_model_without_a_pick_uses_the_default(test_llm):
+    with patch.object(test_llm, "generate_json", return_value="{}") as generate:
+        filler.call_model("prompt", {"type": "object"})
+
+    generate.assert_called_once_with("prompt", {"type": "object"}, "qwen2.5:1.5b")
 

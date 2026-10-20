@@ -1,4 +1,5 @@
-import requests
+import logging
+
 from fastapi import APIRouter, Depends, File, UploadFile, Query
 from sqlmodel import Session
 
@@ -10,11 +11,14 @@ from app.api.schemas.forms import (
     TranscriptionResponse,
 )
 from app.core import paths
-from app.core.config import OLLAMA_HOST, OLLAMA_MODEL, RETENTION_PERIOD_DAYS
+from app.core.config import RETENTION_PERIOD_DAYS
+from app.services import llm
 from app.services.whisper import call_whisper_asr
 from app.core.errors.base import AppError
 from app.db.repositories import get_template, get_form_submission, delete_form_submission
 from app.services.form import FormService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/forms", tags=["forms"])
 
@@ -34,6 +38,7 @@ def fill_form(form: FormFill, db: Session = Depends(get_db)):
             template=fetched_template,
             input_id=form.input_id,
             input_text=form.input_text,
+            provider=form.provider,
             model=form.model,
         )
         return FormFillResponse(
@@ -45,30 +50,25 @@ def fill_form(form: FormFill, db: Session = Depends(get_db)):
     except AppError:
         raise
     except Exception as e:
-        raise AppError(str(e), status_code=500, error_code="FORM_FILL_ERROR")
+        # Not an error we know, so keep the traceback
+        logger.exception("Form fill for template %s failed", form.template_id)
+        raise AppError(str(e), status_code=500, error_code="FORM_FILL_ERROR") from e
 
 
 
-@router.get("/models", response_model=ModelsResponse)
+@router.get("/models", response_model=ModelsResponse, deprecated=True)
 def list_models():
-    """List the Whisper-independent extraction models available in the local
-    Ollama instance, plus the configured default. Used by the Fill Form UI's
-    model picker. Falls back to just the default if Ollama is unreachable."""
-    default_model = OLLAMA_MODEL
+    """The default provider's models. Kept until the frontend moves to
+    GET /system/llm/models, which lists every enabled provider."""
+    registry = llm.get_registry()
+    default = registry.default
+    models = [m.name for m in registry.provider_catalog(default.provider).models]
 
-    models: list[str] = []
-    try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
-        response.raise_for_status()
-        models = [m["name"] for m in response.json().get("models", []) if m.get("name")]
-    except requests.exceptions.RequestException:
-        models = []
+    # Always surface the default, even if the server is down or doesn't list it.
+    if default.model not in models:
+        models.insert(0, default.model)
 
-    # Always surface the configured default, even if Ollama hasn't pulled it yet.
-    if default_model not in models:
-        models.insert(0, default_model)
-
-    return ModelsResponse(models=models, default=default_model)
+    return ModelsResponse(models=models, default=default.model)
 
 
 @router.post("/transcribe", response_model=TranscriptionResponse)

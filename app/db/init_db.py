@@ -17,6 +17,7 @@ ALEMBIC_INI = str(Path(__file__).resolve().parents[2] / "alembic.ini")
 
 def _alembic_cfg() -> Config:
     cfg = Config(ALEMBIC_INI)
+    cfg.attributes["configure_logger"] = False
     return cfg
 
 

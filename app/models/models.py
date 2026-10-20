@@ -14,6 +14,7 @@ from app.api.schemas.enums import (
     InputType,
     JobStatus,
     JobType,
+    LLMProvider,
     OutputFormat,
     PeriodType,
     ReportStatus,
@@ -53,6 +54,7 @@ class Job(SQLModel, table=True):
     progress_percent: int = Field(default=0)
     result_url: str | None = None
     error: dict | None = Field(default=None, sa_column=Column(JSON))
+    provider: LLMProvider | None = Field(default=None, sa_column=Column(AutoString, nullable=True))
     model: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
