@@ -22,6 +22,13 @@ class LLMConfigError(LLMError):
     error_code = "LLM_CONFIG_ERROR"
 
 
+class LLMNotAvailableError(LLMError):
+    """The request named a provider or model that isn't enabled or offered."""
+
+    status_code = 422
+    error_code = "LLM_NOT_AVAILABLE"
+
+
 class LLMUnavailableError(LLMError):
     """The server could not be reached, timed out, or kept rate limiting us."""
 
@@ -29,10 +36,22 @@ class LLMUnavailableError(LLMError):
     error_code = "LLM_UNAVAILABLE"
 
 
+class LLMRateLimitError(LLMUnavailableError):
+    """The server kept answering 429 after the retries: rate limited, or out of quota."""
+
+    error_code = "LLM_RATE_LIMITED"
+
+
 class LLMAuthError(LLMError):
     """The server rejected the API key."""
 
     error_code = "LLM_AUTH_FAILED"
+
+
+class LLMModelNotFoundError(LLMError):
+    """The server answered, but doesn't have the model that was asked for."""
+
+    error_code = "LLM_MODEL_NOT_FOUND"
 
 
 class LLMResponseError(LLMError):

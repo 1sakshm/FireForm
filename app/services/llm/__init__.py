@@ -1,13 +1,14 @@
-"""Talking to a language model.
+"""Talking to language models.
 
 The only part of FireForm that sends a prompt anywhere. Callers do
 
     from app.services import llm
 
-    text = llm.get_llm().generate_json(prompt, schema)
+    text = llm.get_registry().generate_json(prompt, schema, provider, model)
 
-and never import the modules underneath. Which server answers is a deployment
-setting (LLM_PROVIDER), see factory.py.
+and never import the modules underneath. Several providers can be enabled at
+once, each request picks one, and provider=None, model=None means the default.
+The settings are read in settings.py, the registry lives in registry.py.
 """
 
 from functools import lru_cache
@@ -18,16 +19,22 @@ from app.services.llm.errors import (
     LLMAuthError,
     LLMConfigError,
     LLMError,
+    LLMModelNotFoundError,
+    LLMNotAvailableError,
+    LLMRateLimitError,
     LLMResponseError,
     LLMUnavailableError,
 )
 from app.services.llm.factory import create_llm
+from app.services.llm.registry import LLMRegistry, ModelChoice, ProviderCatalog
+from app.services.llm.settings import LLMSettings, ProviderSettings, load_settings
+from app.services.llm.validator import ModelCheck, ModelValidator
 
 
 @lru_cache(maxsize=1)
-def get_llm() -> LLM:
-    """The configured LLM, built once per process. Tests reset it with get_llm.cache_clear()."""
-    return create_llm()
+def get_registry() -> LLMRegistry:
+    """The enabled providers, built once per process. Tests reset it with get_registry.cache_clear()."""
+    return LLMRegistry.from_settings(load_settings())
 
 
 __all__ = [
@@ -36,10 +43,21 @@ __all__ = [
     "LLMConfigError",
     "LLMError",
     "LLMHealth",
+    "LLMModelNotFoundError",
+    "LLMNotAvailableError",
     "LLMProvider",
+    "LLMRateLimitError",
+    "LLMRegistry",
     "LLMResponseError",
+    "LLMSettings",
     "LLMUnavailableError",
+    "ModelCheck",
+    "ModelChoice",
     "ModelInfo",
+    "ModelValidator",
+    "ProviderCatalog",
+    "ProviderSettings",
     "create_llm",
-    "get_llm",
+    "get_registry",
+    "load_settings",
 ]

@@ -12,7 +12,15 @@ import openai
 
 from app.api.schemas.enums import HealthState, LLMProvider
 from app.services.llm.base import LLM, PROBE_TIMEOUT_SECONDS, LLMHealth, ModelInfo
-from app.services.llm.errors import LLMAuthError, LLMError, LLMResponseError, LLMUnavailableError
+from app.services.llm.errors import (
+    LLMAuthError,
+    LLMError,
+    LLMModelNotFoundError,
+    LLMRateLimitError,
+    LLMResponseError,
+    LLMUnavailableError,
+)
+from app.services.llm.specs import SPECS
 
 
 class OpenAICompatibleLLM(LLM):
@@ -21,23 +29,27 @@ class OpenAICompatibleLLM(LLM):
         provider: LLMProvider,
         base_url: str,
         api_key: str,
-        model: str,
+        model: str | None,
         timeout: int,
         max_retries: int = 3,
         structured_output: bool = True,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        headers: dict[str, str] | None = None,
+        listed_id_prefix: str = "",
     ):
         super().__init__(provider, model, timeout)
         self.base_url = base_url
         self.structured_output = structured_output
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.listed_id_prefix = listed_id_prefix
         self.client = openai.OpenAI(
             base_url=base_url,
             api_key=api_key or "not-needed",
             timeout=timeout,
             max_retries=max_retries,
+            default_headers=headers,
         )
 
     def _generate(self, prompt: str, schema: dict, model: str) -> str:
@@ -54,7 +66,7 @@ class OpenAICompatibleLLM(LLM):
         if self.temperature is not None:
             options["temperature"] = self.temperature
 
-        with self._translate_errors():
+        with self._translate_errors(model):
             completion = self.client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
@@ -66,14 +78,15 @@ class OpenAICompatibleLLM(LLM):
         choice = completion.choices[0]
         if choice.finish_reason == "length":
             raise LLMResponseError(
-                f"{self.provider.value} stopped at the output limit before finishing. Raise LLM_MAX_TOKENS."
+                f"{self.provider.value} stopped at the output limit before finishing. "
+                f"Raise {SPECS[self.provider].setting('MAX_TOKENS')}."
             )
         return choice.message.content or ""
 
     def list_models(self) -> list[ModelInfo]:
         probe = self.client.with_options(timeout=PROBE_TIMEOUT_SECONDS, max_retries=0)
         with self._translate_errors():
-            return [ModelInfo(name=m.id) for m in probe.models.list()]
+            return [ModelInfo(name=m.id.removeprefix(self.listed_id_prefix)) for m in probe.models.list()]
 
     def health(self) -> LLMHealth:
         t0 = time.monotonic()
@@ -89,20 +102,64 @@ class OpenAICompatibleLLM(LLM):
         )
 
     @contextmanager
-    def _translate_errors(self):
-        """Turn SDK exceptions into LLM errors. Order matters, subclasses first."""
-        where = f"{self.provider.value} at {self.base_url}"
+    def _translate_errors(self, model: str | None = None):
+        """Turn SDK exceptions into LLM errors that say what to fix.
+
+        model is set for a prompt and None for the model list, so a 404 can be
+        told apart: a missing model, or a base URL that points somewhere wrong.
+        Order matters, subclasses first.
+        """
+        spec = SPECS[self.provider]
+        name = self.provider.value
         try:
             yield
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
-            raise LLMAuthError(f"{where} rejected the API key. Check LLM_API_KEY.") from exc
+            raise self._auth_error(exc) from exc
         except openai.RateLimitError as exc:
-            raise LLMUnavailableError(f"{where} is still rate limiting after retries") from exc
+            raise LLMRateLimitError(
+                f"{name} is still rate limiting after retries, or the account is out of quota: {_reason(exc)}"
+            ) from exc
         except openai.APITimeoutError as exc:
-            raise LLMUnavailableError(f"{where} timed out") from exc
+            raise LLMUnavailableError(f"{name} at {self.base_url} timed out") from exc
         except openai.APIConnectionError as exc:
-            raise LLMUnavailableError(f"Could not reach {where}") from exc
+            raise LLMUnavailableError(
+                f"Could not reach {name} at {self.base_url}. Check {spec.setting('BASE_URL')} and the network."
+            ) from exc
         except openai.APIStatusError as exc:
+            reason = _reason(exc)
+            # Gemini answers a bad key with 400 instead of 401
+            if exc.status_code == 400 and "api key" in reason.lower():
+                raise self._auth_error(exc) from exc
+            if exc.status_code == 404 and model:
+                raise LLMModelNotFoundError(f"{name} has no model {model}: {reason}") from exc
+            if exc.status_code == 404:
+                raise LLMResponseError(
+                    f"{name} at {self.base_url} has no model list ({reason}). Check {spec.setting('BASE_URL')}."
+                ) from exc
             if exc.status_code >= 500:
-                raise LLMUnavailableError(f"{where} returned {exc.status_code}") from exc
-            raise LLMResponseError(f"{where} returned {exc.status_code}: {exc.message}") from exc
+                raise LLMUnavailableError(f"{name} had a server error {exc.status_code}: {reason}") from exc
+            raise LLMResponseError(f"{name} refused the request with {exc.status_code}: {reason}") from exc
+
+    def _auth_error(self, exc: openai.APIStatusError) -> LLMAuthError:
+        return LLMAuthError(
+            f"{self.provider.value} rejected the API key: {_reason(exc)}. "
+            f"Check {SPECS[self.provider].setting('API_KEY')}."
+        )
+
+
+def _reason(exc: openai.APIStatusError) -> str:
+    """The provider's own error message, without the JSON around it.
+
+    Bodies differ: OpenAI sends {"error": {"message"}}, Gemini a list of those,
+    Anthropic {"type": "error", "error": {"message"}}.
+    """
+    body = exc.body
+    if isinstance(body, list) and body:
+        body = body[0]
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"]).rstrip(".")
+        if isinstance(error, str):
+            return error.rstrip(".")
+    return exc.message.rstrip(".")

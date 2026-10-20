@@ -31,7 +31,7 @@ class LLMHealth:
 
 
 class LLM(ABC):
-    def __init__(self, provider: LLMProvider, model: str, timeout: int):
+    def __init__(self, provider: LLMProvider, model: str | None, timeout: int):
         self.provider = provider
         self.model = model
         self.timeout = timeout
@@ -40,10 +40,14 @@ class LLM(ABC):
         """Send the prompt and return the answer as JSON object text.
 
         schema is the JSON schema the answer should follow. model overrides the
-        configured one for this call only.
+        provider's default for this call only.
         """
-        raw = self._generate(prompt, schema, model or self.model)
-        return parse_json_object(raw)
+        model = model or self.model
+        raw = self._generate(prompt, schema, model)
+        try:
+            return parse_json_object(raw)
+        except LLMResponseError as exc:
+            raise LLMResponseError(f"{self.provider.value} model {model}: {exc.message}") from None
 
     @abstractmethod
     def _generate(self, prompt: str, schema: dict, model: str) -> str:
