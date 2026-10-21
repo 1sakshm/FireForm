@@ -421,6 +421,15 @@ class TestLLMEndpoints:
             }],
         }
 
+    def test_downloadable_omitted_when_all_installable_models_are_installed(self, client, ollama_offers):
+        ollama_offers(*DEFAULT_OLLAMA_INSTALLABLE_MODELS)
+
+        resp = client.get(f"{API_PREFIX}/system/llm/models")
+
+        assert resp.status_code == 200
+        provider = resp.json()["providers"][0]
+        assert "downloadable" not in provider
+
     def test_list_models_provider_down(self, client, monkeypatch):
         import requests
 
@@ -552,12 +561,21 @@ class TestPullEndpoint:
             test_llm, "list_models", lambda: [ModelInfo(name=n) for n in offered]
         )
 
+        before = client.get(f"{API_PREFIX}/system/llm/models")
+        assert before.status_code == 200
+        before_models = before.json()["providers"][0]["models"]
+        assert {"name": "qwen2.5:3b"} not in before_models
+
+        events = []
+
         def pull(model, on_success=None):
+            yield '{"status": "pulling manifest"}\n'
+            yield '{"status": "success"}\n'
+            events.append("success-line-consumed")
             offered.append("qwen2.5:3b")
             if on_success:
                 on_success()
-            yield '{"status": "pulling manifest"}\n'
-            yield '{"status": "success"}\n'
+                events.append("catalog-refreshed")
 
         monkeypatch.setattr(test_llm, "pull_model", pull)
 
@@ -566,6 +584,7 @@ class TestPullEndpoint:
         assert "application/x-ndjson" in resp.headers["content-type"]
         lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
         assert lines[-1]["status"] == "success"
+        assert events == ["success-line-consumed", "catalog-refreshed"]
 
         models = client.get(f"{API_PREFIX}/system/llm/models").json()["providers"][0]["models"]
         assert {"name": "qwen2.5:3b"} in models
@@ -608,4 +627,3 @@ class TestPullEndpoint:
         lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
         assert any("error" in p for p in lines)
         assert not any(p.get("status") == "success" for p in lines)
-

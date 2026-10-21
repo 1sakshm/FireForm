@@ -124,20 +124,24 @@ class OllamaLLM(LLM):
         self, response: requests.Response, on_success: Callable[[], None] | None = None
     ) -> Iterator[str]:
         saw_error = False
-        saw_success = False
+        success_line: str | None = None
         buffer = ""
 
-        def inspect_line(line: str) -> None:
-            nonlocal saw_error, saw_success
+        def inspect_line(line: str) -> bool:
+            nonlocal saw_error, success_line
             if not line.strip():
-                return
+                return False
             try:
                 event = json.loads(line)
                 if isinstance(event, dict):
                     saw_error = saw_error or ("error" in event)
-                    saw_success = saw_success or (event.get("status") == "success")
+                    if event.get("status") == "success":
+                        if success_line is None:
+                            success_line = line.strip()
+                        return True
             except ValueError:
                 pass
+            return False
 
         try:
             with response:
@@ -154,25 +158,28 @@ class OllamaLLM(LLM):
                     for line in lines:
                         if not line.strip():
                             continue
-                        inspect_line(line)
-                        yield line + "\n"
+                        if not inspect_line(line):
+                            yield line + "\n"
 
                 if buffer.strip():
-                    inspect_line(buffer)
-                    yield buffer.strip() + "\n"
-
-                if not saw_error and not saw_success:
-                    yield json.dumps({"status": "success"}) + "\n"
-                    saw_success = True
+                    if not inspect_line(buffer):
+                        yield buffer.strip() + "\n"
         except requests.RequestException as exc:
             saw_error = True
             yield json.dumps({"error": str(exc)}) + "\n"
 
-        if saw_success and not saw_error and on_success:
+        if saw_error:
+            return
+        if success_line is None:
+            yield json.dumps({"error": "Ollama closed the stream before reporting success"}) + "\n"
+            return
+
+        if on_success:
             try:
                 on_success()
             except Exception:
                 logger.exception("Failed to refresh catalog after pull")
+        yield success_line + "\n"
 
     def _request(
         self, method: str, path: str, timeout: int = PROBE_TIMEOUT_SECONDS, model: str | None = None, **kwargs

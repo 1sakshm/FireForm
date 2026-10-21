@@ -155,7 +155,7 @@ LLMProviderModels:
       type: array
       nullable: true
       description: Ollama models that may be pulled but are not installed yet.
-        Omitted for non-Ollama providers and when empty.
+        Omitted for non-Ollama providers and when no models are downloadable.
       items:
         $ref: "#/DownloadableModel"
 

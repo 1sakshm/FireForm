@@ -598,12 +598,13 @@ class TestOllamaPull:
         assert parsed[-1]["status"] == "success"
         assert fired == [1]
 
-    def test_error_in_stream_no_success_no_callback(self, monkeypatch):
-        """An {\"error\": ...} line means no success sentinel and callback is skipped."""
+    def test_error_after_success_suppresses_success_and_callback(self, monkeypatch):
+        """An error anywhere in the stream prevents success, even after Ollama's success line."""
         import json
 
         chunks = [
             b'{"status": "pulling manifest"}\n',
+            b'{"status": "success"}\n',
             b'{"error": "pull access denied"}\n',
         ]
         resp = _FakeStreamResponse(chunks)
@@ -720,8 +721,8 @@ class TestOllamaPull:
         parsed = [json.loads(l) for l in lines]
         assert parsed[-1]["status"] == "success"
 
-    def test_no_success_event_adds_sentinel(self, monkeypatch):
-        """Stream that ends without {\"status\":\"success\"} gets one appended."""
+    def test_no_success_event_returns_error_without_callback(self, monkeypatch):
+        """A clean EOF without a success event is an error, not an implicit success."""
         import json
 
         chunks = [b'{"status": "pulling manifest"}\n']
@@ -731,8 +732,37 @@ class TestOllamaPull:
         fired = []
         lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
 
-        assert json.loads(lines[-1])["status"] == "success"
-        assert fired == [1]
+        parsed = [json.loads(line) for line in lines]
+        assert parsed[-1] == {"error": "Ollama closed the stream before reporting success"}
+        assert not any(event.get("status") == "success" for event in parsed)
+        assert fired == []
+
+    def test_ollama_success_is_forwarded_once_after_callback(self, monkeypatch):
+        """Duplicate Ollama success events produce one line after the callback."""
+        import json
+
+        chunks = [
+            b'{"status": "pulling manifest"}\n',
+            b'{"status": "success"}\n',
+            b'{"status": "success"}\n',
+        ]
+        resp = _FakeStreamResponse(chunks)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        events = []
+        lines = []
+
+        def on_success():
+            events.append("callback")
+
+        for line in _pull_llm().pull_model("qwen2.5:3b", on_success=on_success):
+            lines.append(line)
+            if json.loads(line).get("status") == "success":
+                events.append("success")
+
+        parsed = [json.loads(line) for line in lines]
+        assert [event for event in parsed if event.get("status") == "success"] == [{"status": "success"}]
+        assert events == ["callback", "success"]
 
 
 # ---------------------------------------------------------------------------

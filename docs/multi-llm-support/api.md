@@ -49,7 +49,7 @@ Add `?refresh=true` to skip the cache. Lists are cached for 60 seconds, failures
 
 - Only enabled providers appear.
 - Hosted models carry `name` only. Ollama adds `size_gb`, `quantization`, `loaded`, and `installed`.
-- `downloadable` lists Ollama models that may be pulled but are not on the host yet (`installed: false`). It appears only for Ollama. Hosted providers omit `downloadable` and `installed`.
+- `downloadable` lists Ollama models that may be pulled but are not on the host yet (`installed: false`). It appears only for Ollama and is omitted when no models are downloadable (for example, when all installable models are already installed). Hosted providers omit `downloadable` and `installed`.
 - With an explicit `_MODELS` list, names the provider does not offer are left out of `models` and appear in `downloadable` (Ollama only).
 - Empty fields are left out of the response.
 
