@@ -16,6 +16,7 @@ from app.models import FormSubmission, Template
 def _seed_template(client, name="T1", pdf_path="src/inputs/t.pdf"):
     resp = client.post(f"{API_PREFIX}/templates/create", json={
         "name": name,
+        "description": "Test deletion template",
         "pdf_path": pdf_path,
         "fields": {"name": "string"},
     })
@@ -69,7 +70,7 @@ class TestDeleteTemplate:
 
     def test_delete_template_deletes_pdf_file(self, client, tmp_path, monkeypatch):
         """Verify the template PDF file is removed from disk on delete."""
-        monkeypatch.setattr("app.api.routes.templates.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
         pdf_file = tmp_path / "myform.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake")
 
@@ -81,7 +82,7 @@ class TestDeleteTemplate:
 
     def test_delete_template_deletes_submission_output_pdfs(self, client, db, tmp_path, monkeypatch):
         """Output PDFs of related submissions should be wiped on template deletion."""
-        monkeypatch.setattr("app.api.routes.templates.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
 
         out_pdf = tmp_path / "filled.pdf"
         out_pdf.write_bytes(b"%PDF-1.4 filled")
@@ -117,7 +118,7 @@ class TestDeleteSubmission:
         assert resp.status_code == 404
 
     def test_delete_submission_removes_output_pdf(self, client, db, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.api.routes.forms.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
         out_pdf = tmp_path / "filled_out.pdf"
         out_pdf.write_bytes(b"%PDF-1.4")
 
@@ -167,7 +168,7 @@ class TestPurgeSubmissions:
         assert resp.json()["purged_count"] == 0
 
     def test_purge_removes_output_pdf_file(self, client, db, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.api.routes.forms.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
         out_pdf = tmp_path / "old_filled.pdf"
         out_pdf.write_bytes(b"%PDF-1.4")
 
@@ -186,12 +187,27 @@ class TestPurgeSubmissions:
         assert resp.status_code == 200
         assert not out_pdf.exists()
 
+    def test_purge_rejects_negative_or_zero_days(self, client, db):
+        """Purge with non-positive days (<= 0) should be rejected with 422 to prevent catastrophic deletion."""
+        tpl_id = _seed_template(client)
+        sub_id = _seed_submission(db, tpl_id)
+
+        resp_negative = client.post(f"{API_PREFIX}/forms/purge?days=-5")
+        assert resp_negative.status_code == 422
+
+        resp_zero = client.post(f"{API_PREFIX}/forms/purge?days=0")
+        assert resp_zero.status_code == 422
+
+        # Verify submission was not deleted
+        assert db.get(FormSubmission, sub_id) is not None
+
 
 # ===========================================================================
 # API-Key Access Control
 # ===========================================================================
 
 class TestApiKeyAccessControl:
+
 
     @pytest.fixture(autouse=True)
     def _set_api_key(self, monkeypatch):

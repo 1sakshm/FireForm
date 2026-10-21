@@ -1,10 +1,15 @@
-from pydantic import BaseModel
-
+from pydantic import BaseModel, ConfigDict
 
 class TemplateCreate(BaseModel):
     name: str
+    description: str = ""
     pdf_path: str
-    fields: dict
+    fields: dict = {}
+
+
+class TemplateUpdate(BaseModel):
+    name: str | None = None
+    fields: dict | None = None
 
 
 class MakeFillableRequest(BaseModel):
@@ -15,21 +20,22 @@ class MakeFillableResponse(BaseModel):
     pdf_path: str
     field_count: int | None = None
 
+
 class TemplateResponse(BaseModel):
     id: int
     name: str
+    description: str
     pdf_path: str
     fields: dict
     field_count: int | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExtractedField(BaseModel):
     name: str
-    description: str
-    type: str
+    description: str = ""
+    type: str = "string"
 
 
 class TemplateUploadResponse(BaseModel):
@@ -37,3 +43,5 @@ class TemplateUploadResponse(BaseModel):
     pdf_path: str
     field_count: int | None = None
     fields: list[ExtractedField] = []
+    schema_data: dict | None = None
+    tables: list[dict] | None = None

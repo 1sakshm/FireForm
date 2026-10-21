@@ -2,14 +2,13 @@ name: Lint
 
 on:
   push:
-    branches: [main,development]
+    branches: [main, development]  # post-merge verification after PRs land
   pull_request:
-    branches: [main,development]
+    branches: [main, development, 'development-*']  # gates all PRs
 
 jobs:
   lint:
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +22,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Install linter
-        run: uv pip install --system ruff
+        run: uv pip install --system ruff==0.16.1
 
       - name: Run linter
         run: |

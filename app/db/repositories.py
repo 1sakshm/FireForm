@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlmodel import Session, select
@@ -20,12 +21,40 @@ def list_templates(session: Session) -> list[Template]:
     statement = select(Template).order_by(Template.created_at.desc(), Template.id.desc())
     return list(session.exec(statement))
 
+
+def update_template(session: Session, template: Template) -> Template:
+    session.add(template)
+    session.commit()
+    session.refresh(template)
+    return template
+
 # Forms
 def create_form(session: Session, form: FormSubmission) -> FormSubmission:
     session.add(form)
     session.commit()
     session.refresh(form)
     return form
+
+
+def get_submissions(session: Session) -> list[tuple[FormSubmission, str | None]]:
+    statement = (
+        select(FormSubmission, Template.name)
+        .join(Template, FormSubmission.template_id == Template.id, isouter=True)
+        .order_by(FormSubmission.created_at.desc(), FormSubmission.id.desc())
+    )
+    return list(session.exec(statement).all())
+
+
+def get_submissions_with_template(session: Session) -> list[tuple[FormSubmission, str | None]]:
+    statement = select(FormSubmission, Template.name).join(
+        Template, FormSubmission.template_id == Template.id, isouter=True
+    )
+    return list(session.exec(statement).all())
+
+
+def get_submissions_before(session: Session, cutoff: datetime) -> list[FormSubmission]:
+    statement = select(FormSubmission).where(FormSubmission.created_at < cutoff)
+    return list(session.exec(statement))
 
 
 # Jobs
@@ -60,6 +89,16 @@ def update_job(session: Session, job: Job) -> Job:
 def delete_template(session: Session, template: Template) -> None:
     session.delete(template)
     session.commit()
+
+
+def get_submissions_by_template(session: Session, template_id: int) -> list[FormSubmission]:
+    statement = select(FormSubmission).where(FormSubmission.template_id == template_id)
+    return list(session.exec(statement))
+
+
+def get_jobs_by_template(session: Session, template_id: int) -> list[Job]:
+    statement = select(Job).where(Job.template_id == template_id)
+    return list(session.exec(statement))
 
 
 def get_form_submission(session: Session, submission_id: int) -> FormSubmission | None:

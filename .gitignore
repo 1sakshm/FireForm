@@ -30,3 +30,18 @@ CLAUDE.md
 
 *temp/
 *.env*
+!*.env.example
+
+# Local benchmark output
+reports/
+
+# Benchmark run output
+benchmark/results/
+
+# Local VS Code workspace configuration
+*.code-workspace
+
+# Uploaded templates and filled PDFs (keep the tracked sample templates)
+data/inputs/*
+!data/inputs/ics_209.pdf
+!data/inputs/file_template_manual.pdf

@@ -28,13 +28,46 @@ DEFAULT_TEMPLATE_DIR = os.getenv("FIREFORM_TEMPLATE_DIR", "data/inputs")
 # --- Database -------------------------------------------------------------
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://fireform:fireform@localhost:5432/fireform",
+    "postgresql+psycopg2://fireform:fireform@localhost:5432/fireform",
 )
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 DB_ECHO = os.getenv("FIREFORM_DB_ECHO", "true").lower() == "true"
 
 # --- External services ----------------------------------------------------
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+
+# --- LLM providers --------------------------------------------------------
+# Every provider with a non empty <PROVIDER>_MODELS is enabled, so several can
+# run side by side and each request picks one. LLM_PROVIDER and LLM_MODEL pick
+# the default. Kept as raw strings, app/services/llm/settings.py parses and
+# validates them at startup. Documented in docker/.env.example.
+LLM_PROVIDER = (os.getenv("LLM_PROVIDER", "").strip() or "ollama").lower()
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+LLM_TIMEOUT = os.getenv("LLM_TIMEOUT", str(OLLAMA_TIMEOUT)).strip()
+LLM_MAX_RETRIES = os.getenv("LLM_MAX_RETRIES", "3").strip()
+LLM_ALLOW_EXTERNAL = os.getenv("LLM_ALLOW_EXTERNAL", "false").strip()
+LLM_TEMPERATURE = os.getenv("LLM_TEMPERATURE", "0").strip()
+
+
+def _provider_env(prefix: str, **defaults: str) -> dict[str, str]:
+    """The <PREFIX>_* settings of one provider, keyed without the prefix."""
+    keys = ("BASE_URL", "API_KEY", "MODELS", "MAX_TOKENS", "STRUCTURED_OUTPUT")
+    return {key: os.getenv(f"{prefix}_{key}", defaults.get(key, "")).strip() for key in keys}
+
+
+# Keyed by LLMProvider value. Ollama keeps its own OLLAMA_HOST and lists every
+# pulled model unless OLLAMA_MODELS says otherwise.
+LLM_PROVIDER_ENV = {
+    "ollama": {**_provider_env("OLLAMA", MODELS="*"), "BASE_URL": OLLAMA_HOST},
+    "openai": _provider_env("OPENAI"),
+    "gemini": _provider_env("GEMINI"),
+    "anthropic": _provider_env("ANTHROPIC"),
+    "custom": _provider_env("CUSTOM"),
+}
+
 WHISPER_HOST = os.getenv("WHISPER_HOST", "http://localhost:9000").rstrip("/")
 
 # --- Celery / Redis -------------------------------------------------------

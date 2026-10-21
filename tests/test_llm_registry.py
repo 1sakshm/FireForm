@@ -1,0 +1,453 @@
+"""Tests for picking a provider and model: ModelSelection, LLMRegistry,
+ModelValidator, and the endpoints on top of them.
+
+The registry tests use FakeLLM, so nothing goes over the network.
+"""
+
+import pytest
+from sqlmodel import select
+
+from app.api.schemas.enums import InputStatus, InputType
+from app.core.config import API_PREFIX
+from app.models import Input
+from app.services.llm import (
+    LLM,
+    LLMAuthError,
+    LLMNotAvailableError,
+    LLMProvider,
+    LLMRegistry,
+    LLMSettings,
+    LLMUnavailableError,
+    ModelChoice,
+    ModelInfo,
+    ModelValidator,
+    ProviderSettings,
+)
+from app.services.llm.registry import CACHE_SECONDS, FAILURE_CACHE_SECONDS
+from app.services.llm.selection import ModelSelection
+from app.services.llm.specs import SPECS
+
+OLLAMA, GEMINI, OPENAI = LLMProvider.ollama, LLMProvider.gemini, LLMProvider.openai
+
+
+class FakeLLM(LLM):
+    def __init__(self, provider, offered=(), down=False, error=None, list_error=None):
+        super().__init__(provider, None, 5)
+        self.offered = list(offered)
+        self.down = down
+        self.error = error
+        self.list_error = list_error
+        self.list_calls = 0
+        self.generated = []
+
+    def _generate(self, prompt, schema, model):
+        self.generated.append(model)
+        if self.error:
+            raise self.error
+        return '{"ok": true}'
+
+    def list_models(self):
+        self.list_calls += 1
+        if self.list_error:
+            raise self.list_error
+        if self.down:
+            raise LLMUnavailableError(f"Could not reach {self.provider.value}")
+        return [ModelInfo(name=n) for n in self.offered]
+
+    def health(self):
+        raise NotImplementedError
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def _provider(provider, models, default_model=None):
+    return ProviderSettings(
+        spec=SPECS[provider],
+        base_url="http://local:1",
+        models=ModelSelection.parse(models),
+        default_model=default_model,
+    )
+
+
+def _registry(clients, settings=None, warnings=(), clock=None):
+    """Ollama is the default with qwen, offering qwen and llama. Gemini allows
+    g1 and g2 but only offers g1."""
+    settings = settings or {
+        OLLAMA: _provider(OLLAMA, "*", "qwen"),
+        GEMINI: _provider(GEMINI, "g1,g2", "g1"),
+    }
+    llm_settings = LLMSettings(providers=settings, default_provider=OLLAMA, warnings=tuple(warnings))
+    return LLMRegistry(llm_settings, clients, clock=clock or Clock())
+
+
+@pytest.fixture
+def ollama():
+    return FakeLLM(OLLAMA, ["qwen", "llama"])
+
+
+@pytest.fixture
+def gemini():
+    return FakeLLM(GEMINI, ["g1", "g3"])
+
+
+@pytest.fixture
+def registry(ollama, gemini):
+    return _registry({OLLAMA: ollama, GEMINI: gemini})
+
+
+# ---------------------------------------------------------------------------
+# ModelSelection
+# ---------------------------------------------------------------------------
+
+class TestModelSelection:
+
+    def test_parse(self):
+        assert ModelSelection.parse("").is_empty
+        assert ModelSelection.parse(" , ").is_empty
+        assert ModelSelection.parse("*").wildcard
+        assert ModelSelection.parse("a,*").wildcard
+        assert ModelSelection.parse(" a, b ,a").names == ("a", "b")
+
+    def test_allows(self):
+        assert ModelSelection.parse("*").allows("anything")
+        assert ModelSelection.parse("a,b").allows("b")
+        assert not ModelSelection.parse("a,b").allows("c")
+
+    def test_pick_keeps_configured_order_and_reports_missing(self):
+        offered = [ModelInfo(name="c", size_gb=1.0), ModelInfo(name="a")]
+        kept, missing = ModelSelection.parse("a,b,c").pick(offered)
+        assert [m.name for m in kept] == ["a", "c"]
+        assert kept[1].size_gb == 1.0
+        assert missing == ["b"]
+
+    def test_pick_wildcard_keeps_everything(self):
+        offered = [ModelInfo(name="x"), ModelInfo(name="y")]
+        assert ModelSelection.parse("*").pick(offered) == (offered, [])
+
+
+# ---------------------------------------------------------------------------
+# LLMRegistry
+# ---------------------------------------------------------------------------
+
+class TestResolve:
+
+    def test_nothing_named_is_the_default_without_asking(self, registry, ollama):
+        assert registry.resolve() == ModelChoice(OLLAMA, "qwen")
+        assert registry.resolve(OLLAMA, "qwen") == ModelChoice(OLLAMA, "qwen")
+        assert ollama.list_calls == 0
+
+    def test_provider_alone_gets_its_default_model(self, registry):
+        assert registry.resolve("gemini") == ModelChoice(GEMINI, "g1")
+
+    def test_model_alone_goes_to_the_default_provider(self, registry):
+        assert registry.resolve(None, "llama") == ModelChoice(OLLAMA, "llama")
+
+    def test_offered_model_is_checked_once_then_cached(self, registry, ollama):
+        registry.resolve(OLLAMA, "llama")
+        registry.resolve(OLLAMA, "llama")
+        assert ollama.list_calls == 1
+
+    def test_cache_expires(self, ollama, gemini):
+        clock = Clock()
+        registry = _registry({OLLAMA: ollama, GEMINI: gemini}, clock=clock)
+        registry.resolve(OLLAMA, "llama")
+        clock.now = CACHE_SECONDS + 1
+        registry.resolve(OLLAMA, "llama")
+        assert ollama.list_calls == 2
+
+    def test_failure_is_cached_for_less_time(self, gemini):
+        clock = Clock()
+        down = FakeLLM(OLLAMA, down=True)
+        registry = _registry({OLLAMA: down, GEMINI: gemini}, clock=clock)
+        registry.provider_catalog(OLLAMA)
+        clock.now = FAILURE_CACHE_SECONDS + 1
+        registry.provider_catalog(OLLAMA)
+        assert down.list_calls == 2
+
+    @pytest.mark.parametrize("provider, model, message", [
+        ("openai", None, "openai is not enabled"),
+        ("mystery", None, "'mystery' is not a provider"),
+        ("gemini", "g9", "g9 is not in GEMINI_MODELS"),
+        ("gemini", "g2", "gemini does not offer g2"),
+        ("ollama", "missing", "ollama does not offer missing"),
+    ])
+    def test_unavailable_picks_are_422(self, registry, provider, model, message):
+        with pytest.raises(LLMNotAvailableError, match=message) as info:
+            registry.resolve(provider, model)
+        assert info.value.status_code == 422
+        assert info.value.error_code == "LLM_NOT_AVAILABLE"
+
+    def test_name_outside_the_list_is_refused_without_asking(self, registry, gemini):
+        with pytest.raises(LLMNotAvailableError):
+            registry.resolve(GEMINI, "g9")
+        assert gemini.list_calls == 0
+
+    def test_unreachable_provider_is_503(self, ollama):
+        registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
+        with pytest.raises(LLMUnavailableError, match="Could not reach gemini") as info:
+            registry.resolve(GEMINI, "g1")
+        assert info.value.status_code == 503
+
+    def test_rejected_key_stays_an_auth_error(self, ollama):
+        broken = FakeLLM(GEMINI, list_error=LLMAuthError("gemini rejected the API key. Check GEMINI_API_KEY."))
+        registry = _registry({OLLAMA: ollama, GEMINI: broken})
+        with pytest.raises(LLMAuthError) as info:
+            registry.resolve(GEMINI, "g1")
+        assert info.value.error_code == "LLM_AUTH_FAILED"
+        listing = registry.provider_catalog(GEMINI)
+        assert (listing.available, listing.error_code) == (False, "LLM_AUTH_FAILED")
+
+    def test_provider_going_down_and_back_is_logged(self, ollama, caplog):
+        clock = Clock()
+        gemini = FakeLLM(GEMINI, ["g1"])
+        registry = _registry({OLLAMA: ollama, GEMINI: gemini}, clock=clock)
+        registry.provider_catalog(GEMINI)
+        assert caplog.records == []
+
+        gemini.down = True
+        registry.provider_catalog(GEMINI, refresh=True)
+        gemini.down = False
+        registry.provider_catalog(GEMINI, refresh=True)
+        assert [r.getMessage() for r in caplog.records] == [
+            "LLM provider gemini is unavailable: Could not reach gemini",
+            "LLM provider gemini is available again",
+        ]
+
+    def test_verify_false_skips_the_provider(self, registry, gemini):
+        assert registry.resolve(GEMINI, "g2", verify=False) == ModelChoice(GEMINI, "g2")
+        assert gemini.list_calls == 0
+
+    def test_wildcard_provider_without_default_needs_a_model(self, ollama):
+        settings = {OLLAMA: _provider(OLLAMA, "*", "qwen"), OPENAI: _provider(OPENAI, "*")}
+        registry = _registry({OLLAMA: ollama, OPENAI: FakeLLM(OPENAI, ["o"])}, settings=settings)
+        with pytest.raises(LLMNotAvailableError, match="openai has no default model"):
+            registry.resolve(OPENAI)
+        assert registry.resolve(OPENAI, "o") == ModelChoice(OPENAI, "o")
+
+
+class TestCatalogAndGenerate:
+
+    def test_catalog(self, ollama):
+        registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, ["g1", "g3"])})
+        by_provider = {c.provider: c for c in registry.catalog()}
+
+        assert [m.name for m in by_provider[OLLAMA].models] == ["qwen", "llama"]
+        assert by_provider[OLLAMA].default_model == "qwen"
+        gemini = by_provider[GEMINI]
+        assert gemini.available
+        assert [m.name for m in gemini.models] == ["g1"]
+        assert gemini.missing == ("g2",)
+
+    def test_unreachable_provider_has_no_models(self, ollama):
+        registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
+        gemini = registry.provider_catalog(GEMINI)
+        assert not gemini.available
+        assert gemini.models == ()
+        assert gemini.detail == "Could not reach gemini"
+
+    def test_refresh_asks_again(self, registry, ollama):
+        registry.provider_catalog(OLLAMA)
+        registry.provider_catalog(OLLAMA, refresh=True)
+        assert ollama.list_calls == 2
+
+    def test_generate_json_goes_to_the_picked_provider(self, registry, ollama, gemini):
+        assert registry.generate_json("p", {}, "gemini", "g1") == '{"ok": true}'
+        assert gemini.generated == ["g1"]
+        registry.generate_json("p", {})
+        assert ollama.generated == ["qwen"]
+
+
+# ---------------------------------------------------------------------------
+# ModelValidator
+# ---------------------------------------------------------------------------
+
+class TestModelValidator:
+
+    def test_check_config(self):
+        registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["llama"]), GEMINI: FakeLLM(GEMINI, ["g1"])},
+            warnings=["openai is off: OPENAI_API_KEY is needed."],
+        )
+        assert ModelValidator(registry).check_config() == [
+            "openai is off: OPENAI_API_KEY is needed.",
+            "ollama does not offer the default model qwen. Fills will fail.",
+            "GEMINI_MODELS has g2, but gemini does not offer it. It is left out of the model list.",
+        ]
+
+    def test_check_config_unreachable(self, ollama):
+        registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
+        assert ModelValidator(registry).check_config() == [
+            "Could not check the gemini models. Could not reach gemini",
+        ]
+
+    def test_probe_ok(self, registry, gemini):
+        check = ModelValidator(registry).probe("gemini", "g1")
+        assert (check.provider, check.model, check.ok, check.detail) == (GEMINI, "g1", True, None)
+        assert check.latency_ms is not None
+        assert gemini.generated == ["g1"]
+
+    def test_probe_failure_is_a_result(self, ollama):
+        broken = FakeLLM(GEMINI, ["g1"], error=LLMUnavailableError("Could not reach gemini"))
+        registry = _registry({OLLAMA: ollama, GEMINI: broken})
+        check = ModelValidator(registry).probe("gemini", "g2")
+        assert not check.ok
+        assert check.detail == "Could not reach gemini"
+        assert check.error_code == "LLM_UNAVAILABLE"
+
+    def test_probe_refuses_disabled_provider(self, registry):
+        with pytest.raises(LLMNotAvailableError):
+            ModelValidator(registry).probe("openai", "o")
+
+
+# ---------------------------------------------------------------------------
+# Endpoints. Use the conftest registry: one Ollama listing every model.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ollama_offers(test_llm, monkeypatch):
+    """Make the conftest Ollama offer these models."""
+    def offer(*names):
+        monkeypatch.setattr(test_llm, "list_models", lambda: [ModelInfo(name=n) for n in names])
+    return offer
+
+
+class TestLLMEndpoints:
+
+    def test_list_models(self, client, ollama_offers):
+        ollama_offers("qwen2.5:1.5b", "llama3:8b")
+        resp = client.get(f"{API_PREFIX}/system/llm/models")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "default": {"provider": "ollama", "model": "qwen2.5:1.5b"},
+            "providers": [{
+                "provider": "ollama",
+                "available": True,
+                "default_model": "qwen2.5:1.5b",
+                "models": [{"name": "qwen2.5:1.5b"}, {"name": "llama3:8b"}],
+            }],
+        }
+
+    def test_list_models_provider_down(self, client, monkeypatch):
+        import requests
+
+        def boom(*a, **k):
+            raise requests.exceptions.ConnectionError("down")
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", boom)
+        provider = client.get(f"{API_PREFIX}/system/llm/models").json()["providers"][0]
+        assert provider["available"] is False
+        assert provider["error_code"] == "LLM_UNAVAILABLE"
+        assert provider["models"] == []
+        assert "Could not reach Ollama" in provider["detail"]
+
+    def test_test_model_ok(self, client, test_llm, monkeypatch):
+        monkeypatch.setattr(test_llm, "_generate", lambda prompt, schema, model: '{"ok": true}')
+        resp = client.post(f"{API_PREFIX}/system/llm/test", json={"model": "llama3:8b"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert (body["provider"], body["model"], body["ok"]) == ("ollama", "llama3:8b", True)
+
+    def test_test_model_without_body_uses_default(self, client, test_llm, monkeypatch):
+        monkeypatch.setattr(test_llm, "_generate", lambda prompt, schema, model: '{"ok": true}')
+        body = client.post(f"{API_PREFIX}/system/llm/test").json()
+        assert (body["provider"], body["model"], body["ok"]) == ("ollama", "qwen2.5:1.5b", True)
+
+    def test_test_model_failure(self, client, test_llm, monkeypatch):
+        def fail(prompt, schema, model):
+            raise LLMUnavailableError("Ollama at http://ollama:11434 timed out")
+
+        monkeypatch.setattr(test_llm, "_generate", fail)
+        body = client.post(f"{API_PREFIX}/system/llm/test", json={}).json()
+        assert body["ok"] is False
+        assert body["detail"] == "Ollama at http://ollama:11434 timed out"
+
+    def test_test_model_disabled_provider(self, client):
+        resp = client.post(f"{API_PREFIX}/system/llm/test", json={"provider": "gemini"})
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "LLM_NOT_AVAILABLE"
+
+    def test_fill_refuses_model_the_provider_lacks(self, client, db, ollama_offers):
+        """Refused before anything is stored, including the input for input_text."""
+        ollama_offers("qwen2.5:1.5b")
+        tpl = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "T", "description": "d", "pdf_path": "src/inputs/t.pdf", "fields": {"name": "string"},
+        }).json()["id"]
+        resp = client.post(f"{API_PREFIX}/forms/fill", json={
+            "template_id": tpl, "input_text": "fire", "model": "llama3:8b",
+        })
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "LLM_NOT_AVAILABLE"
+        assert db.exec(select(Input)).all() == []
+
+    def test_llm_failure_is_answered_and_logged(
+        self, client, test_llm, mock_controller, tmp_path, monkeypatch, caplog
+    ):
+        """A rejected key reaches the client as LLM_AUTH_FAILED and the log as one line."""
+        from app.services.form_filler import filler
+
+        def reject(prompt, schema, model):
+            raise LLMAuthError("gemini rejected the API key: Please pass a valid API key. Check GEMINI_API_KEY.")
+
+        monkeypatch.setattr(test_llm, "_generate", reject)
+        # Skip the PDF work, go straight to the LLM call the real filler makes
+        mock_controller["mock_fill"].side_effect = lambda **kw: filler.call_model(
+            "prompt", {}, kw["model"], kw["provider"]
+        )
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        (tmp_path / "t.pdf").write_bytes(b"%PDF-1.4 fake")
+        tpl = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "T", "description": "d", "pdf_path": "t.pdf", "fields": {"name": "string"},
+        }).json()["id"]
+
+        resp = client.post(f"{API_PREFIX}/forms/fill", json={"template_id": tpl, "input_text": "fire"})
+
+        assert resp.status_code == 502
+        assert resp.json()["error_code"] == "LLM_AUTH_FAILED"
+        assert "Check GEMINI_API_KEY" in resp.json()["message"]
+        logged = [r.getMessage() for r in caplog.records if r.name == "app.core.errors.handlers"]
+        assert logged == [
+            "POST /api/v1/forms/fill failed with 502 LLM_AUTH_FAILED: "
+            "gemini rejected the API key: Please pass a valid API key. Check GEMINI_API_KEY."
+        ]
+
+    def test_wrong_settings_are_an_error_response(self, client, monkeypatch):
+        """The app stays up and says what to fix, instead of crashing at startup."""
+        from app.services.llm import LLMConfigError
+
+        def broken():
+            raise LLMConfigError("GEMINI_API_KEY is set but GEMINI_MODELS is empty.")
+
+        monkeypatch.setattr("app.services.llm.get_registry", broken)
+
+        resp = client.get(f"{API_PREFIX}/system/llm/models")
+        assert resp.status_code == 500
+        assert resp.json() == {
+            "error_code": "LLM_CONFIG_ERROR",
+            "message": "GEMINI_API_KEY is set but GEMINI_MODELS is empty.",
+        }
+        llm_health = client.get(f"{API_PREFIX}/health").json()["components"]["llm"]
+        assert llm_health["status"] == "unhealthy"
+        assert llm_health["detail"] == "GEMINI_API_KEY is set but GEMINI_MODELS is empty."
+
+    def test_jobs_refuse_disabled_provider(self, client, db, monkeypatch):
+        queued = []
+        monkeypatch.setattr("app.api.routes.jobs.fill_form_task.apply_async", lambda *a, **k: queued.append(a))
+        tpl = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "T", "description": "d", "pdf_path": "src/inputs/t.pdf", "fields": {"name": "string"},
+        }).json()["id"]
+        record = Input(input_type=InputType.text, status=InputStatus.ready, transcript="fire")
+        db.add(record)
+        db.commit()
+
+        resp = client.post(f"{API_PREFIX}/forms/jobs", json={
+            "template_ids": [tpl], "input_id": str(record.input_id), "provider": "anthropic",
+        })
+        assert resp.status_code == 422
+        assert queued == []
+

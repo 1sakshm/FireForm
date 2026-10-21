@@ -1,16 +1,16 @@
-from pydantic import BaseModel, field_validator
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from app.api.schemas.enums import JobStatus, JobType, LLMProvider
 
 
 class FormFill(BaseModel):
     template_id: int
-    input_text: str
+    input_text: str | None = None
+    input_id: UUID | None = None
+    provider: LLMProvider | None = None
     model: str | None = None
-
-    @field_validator("input_text")
-    def validate_input_text(cls, value):
-        if not value or not value.strip():
-            raise ValueError("Input text cannot be empty")
-        return value
 
 
 class FormFillResponse(BaseModel):
@@ -18,9 +18,9 @@ class FormFillResponse(BaseModel):
     template_id: int
     input_text: str
     output_pdf_path: str
+    values: dict | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TranscriptionResponse(BaseModel):
@@ -34,14 +34,9 @@ class ModelsResponse(BaseModel):
 
 class AsyncFormFill(BaseModel):
     template_ids: list[int]
-    input_text: str
+    input_id: UUID
+    provider: LLMProvider | None = None
     model: str | None = None
-
-    @field_validator("input_text")
-    def validate_input_text(cls, value):
-        if not value or not value.strip():
-            raise ValueError("Input text cannot be empty")
-        return value
 
     @field_validator("template_ids")
     def validate_template_ids(cls, value):
@@ -52,8 +47,8 @@ class AsyncFormFill(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
-    job_type: str
-    status: str
+    job_type: JobType
+    status: JobStatus
     progress_percent: int = 0
     result_url: str | None = None
     error: dict | None = None
@@ -66,7 +61,7 @@ class JobResponse(BaseModel):
 
 class AsyncJobSubmitResponse(BaseModel):
     job_id: str
-    status: str
+    status: JobStatus
     poll_url: str
 
     class Config:
@@ -75,3 +70,6 @@ class AsyncJobSubmitResponse(BaseModel):
 
 class AsyncFormFillResponse(BaseModel):
     jobs: list[AsyncJobSubmitResponse]
+    # Present only on a partial failure (HTTP 207): lists the job IDs that were
+    # successfully queued before the broker became unreachable.
+    error: str | None = None
