@@ -5,6 +5,7 @@ The registry tests use FakeLLM, so nothing goes over the network.
 """
 
 import pytest
+import requests
 from sqlmodel import select
 
 from app.api.schemas.enums import InputStatus, InputType
@@ -25,7 +26,7 @@ from app.services.llm import (
 )
 from app.services.llm.registry import CACHE_SECONDS, FAILURE_CACHE_SECONDS
 from app.services.llm.selection import ModelSelection
-from app.services.llm.specs import SPECS
+from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS, SPECS
 
 OLLAMA, GEMINI, OPENAI = LLMProvider.ollama, LLMProvider.gemini, LLMProvider.openai
 
@@ -66,12 +67,13 @@ class Clock:
         return self.now
 
 
-def _provider(provider, models, default_model=None):
+def _provider(provider, models, default_model=None, installable_models=()):
     return ProviderSettings(
         spec=SPECS[provider],
         base_url="http://local:1",
         models=ModelSelection.parse(models),
         default_model=default_model,
+        installable_models=installable_models,
     )
 
 
@@ -263,6 +265,82 @@ class TestCatalogAndGenerate:
         assert ollama.generated == ["qwen"]
 
 
+class TestDownloadableCatalog:
+
+    def test_wildcard_downloadable_is_default_installable_minus_offered(self, ollama):
+        """OLLAMA_MODELS=* → downloadable = default installable set not yet on Ollama."""
+        registry = _registry({OLLAMA: ollama})
+        cat = registry.provider_catalog(OLLAMA)
+        offered = {m.name for m in cat.models}
+        expected = [
+            name for name in DEFAULT_OLLAMA_INSTALLABLE_MODELS if name not in offered
+        ]
+        assert [d.name for d in cat.downloadable] == expected
+        assert all(d.installed is False for d in cat.downloadable)
+
+    def test_wildcard_respects_ollama_installable_models_override(self, ollama):
+        settings = {OLLAMA: _provider(OLLAMA, "*", "qwen", installable_models=("tiny:1b", "other:2b"))}
+        registry = _registry({OLLAMA: ollama}, settings=settings)
+        cat = registry.provider_catalog(OLLAMA)
+        offered = {m.name for m in cat.models}
+        assert [d.name for d in cat.downloadable] == [n for n in ("tiny:1b", "other:2b") if n not in offered]
+
+    def test_explicit_models_list_downloadable_is_missing_not_offered(self, ollama):
+        settings = {OLLAMA: _provider(OLLAMA, "qwen,llama,missing", "qwen")}
+        registry = _registry({OLLAMA: ollama}, settings=settings)
+        cat = registry.provider_catalog(OLLAMA)
+        assert cat.missing == ("missing",)
+        assert [d.name for d in cat.downloadable] == ["missing"]
+
+    def test_non_ollama_has_no_downloadable_or_installed(self, ollama, gemini):
+        registry = _registry({OLLAMA: ollama, GEMINI: gemini})
+        cat = registry.provider_catalog(GEMINI)
+        assert cat.downloadable == ()
+        assert all(getattr(m, "installed", None) is None for m in cat.models)
+
+    def test_resolve_rejects_downloadable_only_model(self, ollama):
+        """A model listed as downloadable but not installed cannot be used for fills."""
+        settings = {OLLAMA: _provider(OLLAMA, "*", "qwen")}
+        ollama.offered = ["qwen"]
+        registry = _registry({OLLAMA: ollama}, settings=settings)
+        with pytest.raises(LLMNotAvailableError, match="ollama does not offer qwen2.5:3b"):
+            registry.resolve(OLLAMA, "qwen2.5:3b")
+
+
+class TestValidatePull:
+
+    def test_non_ollama_provider_rejected(self, registry):
+        with pytest.raises(LLMNotAvailableError, match="only supported for Ollama"):
+            registry.validate_pull("gemini", "g1")
+
+    def test_ollama_disabled_rejected(self):
+        settings = {GEMINI: _provider(GEMINI, "g1", "g1")}
+        llm_settings = LLMSettings(providers=settings, default_provider=GEMINI, warnings=())
+        registry = LLMRegistry(llm_settings, {GEMINI: FakeLLM(GEMINI, ["g1"])})
+        with pytest.raises(LLMNotAvailableError, match="ollama is not enabled"):
+            registry.validate_pull("ollama", "qwen2.5:3b")
+
+    def test_wildcard_rejects_model_outside_installable_set(self, ollama):
+        registry = _registry({OLLAMA: ollama})
+        with pytest.raises(LLMNotAvailableError, match="cannot be pulled"):
+            registry.validate_pull("ollama", "secret:model")
+
+    def test_explicit_list_rejects_model_not_in_ollama_models(self, ollama):
+        settings = {OLLAMA: _provider(OLLAMA, "qwen,llama", "qwen")}
+        registry = _registry({OLLAMA: ollama}, settings=settings)
+        with pytest.raises(LLMNotAvailableError, match="is not in OLLAMA_MODELS"):
+            registry.validate_pull("ollama", "mistral:7b")
+
+    def test_valid_wildcard_installable_passes(self, ollama):
+        registry = _registry({OLLAMA: ollama})
+        registry.validate_pull("ollama", "qwen2.5:3b")
+
+    def test_valid_explicit_configured_missing_passes(self, ollama):
+        settings = {OLLAMA: _provider(OLLAMA, "qwen,llama", "qwen")}
+        registry = _registry({OLLAMA: ollama}, settings=settings)
+        registry.validate_pull("ollama", "llama")
+
+
 # ---------------------------------------------------------------------------
 # ModelValidator
 # ---------------------------------------------------------------------------
@@ -320,27 +398,28 @@ def ollama_offers(test_llm, monkeypatch):
 class TestLLMEndpoints:
 
     def test_list_models(self, client, ollama_offers):
-        # qwen2.5:1.5b is offered, so it won't appear in downloadable.
-        # qwen2.5:3b, qwen2.5:7b and llama3.2:3b are in the default installable set
+        # ollama_offers uses ModelInfo(name=n) without extra fields; FastAPI omits
+        # null fields, so models appear as {"name": "..."}.
+        # qwen2.5:1.5b is offered → not downloadable.
+        # qwen2.5:3b / :7b and llama3.2:3b are in the default installable set
         # but not offered → they appear in downloadable.
         ollama_offers("qwen2.5:1.5b", "llama3:8b")
         resp = client.get(f"{API_PREFIX}/system/llm/models")
         assert resp.status_code == 200
-        body = resp.json()
-        assert body["default"] == {"provider": "ollama", "model": "qwen2.5:1.5b"}
-        assert len(body["providers"]) == 1
-        provider = body["providers"][0]
-        assert provider["provider"] == "ollama"
-        assert provider["available"] is True
-        assert provider["default_model"] == "qwen2.5:1.5b"
-        # Model names must match; extra null fields (size_gb, etc.) are fine
-        assert [m["name"] for m in provider["models"]] == ["qwen2.5:1.5b", "llama3:8b"]
-        # Downloadable: default installable set minus what Ollama already has
-        assert provider["downloadable"] == [
-            {"name": "qwen2.5:3b", "installed": False},
-            {"name": "qwen2.5:7b", "installed": False},
-            {"name": "llama3.2:3b", "installed": False},
-        ]
+        assert resp.json() == {
+            "default": {"provider": "ollama", "model": "qwen2.5:1.5b"},
+            "providers": [{
+                "provider": "ollama",
+                "available": True,
+                "default_model": "qwen2.5:1.5b",
+                "models": [{"name": "qwen2.5:1.5b"}, {"name": "llama3:8b"}],
+                "downloadable": [
+                    {"name": "qwen2.5:3b", "installed": False},
+                    {"name": "qwen2.5:7b", "installed": False},
+                    {"name": "llama3.2:3b", "installed": False},
+                ],
+            }],
+        }
 
     def test_list_models_provider_down(self, client, monkeypatch):
         import requests
@@ -459,4 +538,74 @@ class TestLLMEndpoints:
         })
         assert resp.status_code == 422
         assert queued == []
+
+
+class TestPullEndpoint:
+
+    _PULL = f"{API_PREFIX}/system/llm/pull"
+
+    def test_pull_success_ndjson_and_refreshes_catalog(self, client, test_llm, monkeypatch):
+        import json
+
+        offered = ["qwen2.5:1.5b"]
+        monkeypatch.setattr(
+            test_llm, "list_models", lambda: [ModelInfo(name=n) for n in offered]
+        )
+
+        def pull(model, on_success=None):
+            offered.append("qwen2.5:3b")
+            if on_success:
+                on_success()
+            yield '{"status": "pulling manifest"}\n'
+            yield '{"status": "success"}\n'
+
+        monkeypatch.setattr(test_llm, "pull_model", pull)
+
+        resp = client.post(self._PULL, json={"model": "qwen2.5:3b"})
+        assert resp.status_code == 200
+        assert "application/x-ndjson" in resp.headers["content-type"]
+        lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
+        assert lines[-1]["status"] == "success"
+
+        models = client.get(f"{API_PREFIX}/system/llm/models").json()["providers"][0]["models"]
+        assert {"name": "qwen2.5:3b"} in models
+
+    def test_pull_rejects_non_ollama_provider(self, client):
+        resp = client.post(self._PULL, json={"provider": "gemini", "model": "gemini-2.5-flash"})
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "LLM_NOT_AVAILABLE"
+
+    def test_pull_rejects_unauthorized_model(self, client):
+        resp = client.post(self._PULL, json={"model": "not-in-installable-set:99b"})
+        assert resp.status_code == 422
+        assert resp.json()["error_code"] == "LLM_NOT_AVAILABLE"
+
+    def test_pull_rejects_invalid_model_name(self, client):
+        resp = client.post(self._PULL, json={"model": "bad name!"})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+
+    def test_pull_503_when_ollama_down_before_stream(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.llm.ollama.requests.post",
+            lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectionError("down")),
+        )
+        resp = client.post(self._PULL, json={"model": "qwen2.5:3b"})
+        assert resp.status_code == 503
+        assert resp.json()["error_code"] == "LLM_UNAVAILABLE"
+
+    def test_pull_mid_stream_error_without_success(self, client, test_llm, monkeypatch):
+        import json
+
+        def pull(model, on_success=None):
+            yield '{"status": "downloading"}\n'
+            yield '{"error": "disk full"}\n'
+
+        monkeypatch.setattr(test_llm, "pull_model", pull)
+        resp = client.post(self._PULL, json={"model": "qwen2.5:3b"})
+        assert resp.status_code == 200
+        lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
+        assert any("error" in p for p in lines)
+        assert not any(p.get("status") == "success" for p in lines)
 

@@ -368,6 +368,29 @@ class TestOllamaLLM:
         assert health.provider == "ollama"
         assert "Could not reach Ollama" in health.detail
 
+    def test_list_models_marks_every_tag_as_installed(self, monkeypatch):
+        """Each model from /api/tags carries installed=True."""
+        tags = {
+            "models": [
+                {"name": "qwen2.5:1.5b", "size": 987_654_321, "details": {"quantization_level": "Q4_K_M"}},
+                {"name": "llama3:8b", "size": 4_700_000_000},
+            ]
+        }
+
+        def fake(method, url, **kwargs):
+            if url.endswith("/api/tags"):
+                return _response(json_data=tags)
+            if url.endswith("/api/ps"):
+                return _response(json_data={"models": [{"name": "qwen2.5:1.5b"}]})
+            raise AssertionError(f"unexpected {method} {url}")
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.request", fake)
+        models = self._llm().list_models()
+        assert [m.name for m in models] == ["qwen2.5:1.5b", "llama3:8b"]
+        assert all(m.installed is True for m in models)
+        assert models[0].loaded is True
+        assert models[1].loaded is False
+
 
 # ---------------------------------------------------------------------------
 # OpenAICompatibleLLM
@@ -518,3 +541,250 @@ class TestOpenAICompatibleLLM:
         assert health.status == "unhealthy"
         assert "Could not reach custom" in health.detail
         assert "Check CUSTOM_BASE_URL" in health.detail
+
+
+# ---------------------------------------------------------------------------
+# OllamaLLM.pull_model — streaming, no real network
+# ---------------------------------------------------------------------------
+
+class _FakeStreamResponse:
+    """Simulates requests.Response.iter_content for a pull stream."""
+
+    def __init__(self, chunks: list[bytes], raise_at: int | None = None, raise_exc=None):
+        self._chunks = chunks
+        self._raise_at = raise_at  # raise raise_exc after this many chunks
+        self._raise_exc = raise_exc
+        self.status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=None):
+        for i, chunk in enumerate(self._chunks):
+            if self._raise_at is not None and i >= self._raise_at:
+                raise self._raise_exc
+            yield chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+def _pull_llm(pull_timeout=30):
+    return OllamaLLM(host="http://ollama:11434", model="qwen2.5:1.5b", timeout=300, pull_timeout=pull_timeout)
+
+
+class TestOllamaPull:
+
+    def test_happy_path_streams_lines_and_calls_callback(self, monkeypatch):
+        """Lines are forwarded; callback fires once on success."""
+        import json
+
+        chunks = [
+            b'{"status": "pulling manifest"}\n',
+            b'{"status": "downloading", "completed": 50, "total": 100}\n',
+            b'{"status": "success"}\n',
+        ]
+        resp = _FakeStreamResponse(chunks)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        fired = []
+        lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
+
+        parsed = [json.loads(l) for l in lines]
+        assert parsed[0]["status"] == "pulling manifest"
+        assert parsed[-1]["status"] == "success"
+        assert fired == [1]
+
+    def test_error_in_stream_no_success_no_callback(self, monkeypatch):
+        """An {\"error\": ...} line means no success sentinel and callback is skipped."""
+        import json
+
+        chunks = [
+            b'{"status": "pulling manifest"}\n',
+            b'{"error": "pull access denied"}\n',
+        ]
+        resp = _FakeStreamResponse(chunks)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        fired = []
+        lines = list(_pull_llm().pull_model("secret:model", on_success=lambda: fired.append(1)))
+
+        parsed = [json.loads(l) for l in lines]
+        statuses = [p.get("status") for p in parsed]
+        assert "success" not in statuses
+        assert fired == []
+
+    def test_read_timeout_mid_stream_yields_error_no_success(self, monkeypatch):
+        """A ReadTimeout after the stream starts produces an error line, not success."""
+        import json
+
+        chunks = [b'{"status": "downloading"}\n', b"more"]
+        resp = _FakeStreamResponse(chunks, raise_at=1, raise_exc=requests.exceptions.ReadTimeout("slow"))
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        fired = []
+        lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
+
+        assert any("error" in json.loads(l) for l in lines)
+        assert not any(json.loads(l).get("status") == "success" for l in lines)
+        assert fired == []
+
+    @pytest.mark.parametrize("exc", [
+        requests.exceptions.ChunkedEncodingError("connection broken"),
+        requests.exceptions.ConnectionError("connection reset"),
+    ])
+    def test_connection_lost_mid_stream_yields_error_no_success(self, monkeypatch, exc):
+        """ChunkedEncodingError or ConnectionError mid-stream: error line, no success, no callback."""
+        import json
+
+        chunks = [b'{"status": "downloading"}\n', b"partial"]
+        resp = _FakeStreamResponse(chunks, raise_at=1, raise_exc=exc)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        fired = []
+        lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
+
+        errors = [json.loads(l) for l in lines if "error" in json.loads(l)]
+        assert errors
+        assert errors[0]["error"]
+        assert not any(json.loads(l).get("status") == "success" for l in lines)
+        assert fired == []
+
+    def test_ollama_down_before_stream_raises_unavailable(self, monkeypatch):
+        """ConnectionError before any data → LLMUnavailableError (HTTP 503)."""
+        monkeypatch.setattr(
+            "app.services.llm.ollama.requests.post",
+            lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectionError("down")),
+        )
+        with pytest.raises(LLMUnavailableError, match="Could not reach Ollama"):
+            _pull_llm().pull_model("qwen2.5:3b")
+
+    def test_connect_timeout_before_stream_raises_unavailable(self, monkeypatch):
+        """Timeout before receiving any data → LLMUnavailableError."""
+        monkeypatch.setattr(
+            "app.services.llm.ollama.requests.post",
+            lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.Timeout("timeout")),
+        )
+        with pytest.raises(LLMUnavailableError):
+            _pull_llm().pull_model("qwen2.5:3b")
+
+    def test_uses_correct_timeout_and_body(self, monkeypatch):
+        """requests.post receives timeout=(10, pull_timeout) and body with model name."""
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(kwargs)
+            return _FakeStreamResponse([b'{"status": "success"}\n'])
+
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", fake_post)
+        list(_pull_llm(pull_timeout=77).pull_model("llama3.2:3b"))
+
+        assert calls[0]["timeout"] == (10, 77)
+        assert calls[0]["json"] == {"model": "llama3.2:3b", "stream": True}
+        assert calls[0]["stream"] is True
+
+    def test_json_line_split_across_chunks(self, monkeypatch):
+        """A JSON line split over two chunks is reassembled correctly."""
+        import json
+
+        half1 = b'{"status": "pull'
+        half2 = b'ing manifest"}\n{"status": "success"}\n'
+        resp = _FakeStreamResponse([half1, half2])
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        lines = list(_pull_llm().pull_model("qwen2.5:3b"))
+        parsed = [json.loads(l) for l in lines]
+        statuses = [p["status"] for p in parsed]
+        assert "pulling manifest" in statuses
+        assert "success" in statuses
+
+    def test_empty_lines_and_utf8_content(self, monkeypatch):
+        """Empty lines are skipped; UTF-8 bytes are decoded."""
+        import json
+
+        chunks = [
+            b"\n",
+            b'{"status": "verifying checksum"}\n',
+            b"\n\n",
+            b'{"status": "success"}\n',
+        ]
+        resp = _FakeStreamResponse(chunks)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        lines = list(_pull_llm().pull_model("qwen2.5:3b"))
+        # No empty lines yielded
+        assert all(l.strip() for l in lines)
+        parsed = [json.loads(l) for l in lines]
+        assert parsed[-1]["status"] == "success"
+
+    def test_no_success_event_adds_sentinel(self, monkeypatch):
+        """Stream that ends without {\"status\":\"success\"} gets one appended."""
+        import json
+
+        chunks = [b'{"status": "pulling manifest"}\n']
+        resp = _FakeStreamResponse(chunks)
+        monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
+
+        fired = []
+        lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
+
+        assert json.loads(lines[-1])["status"] == "success"
+        assert fired == [1]
+
+
+# ---------------------------------------------------------------------------
+# load_settings: Ollama pull_timeout and installable_models
+# ---------------------------------------------------------------------------
+
+class TestOllamaSettings:
+
+    def _ollama_cfg(self, **overrides):
+        base = {
+            "OLLAMA_MODEL": "qwen2.5:1.5b",
+            "OLLAMA_TIMEOUT": 300,
+            "OLLAMA_PULL_TIMEOUT": 120,
+            "OLLAMA_INSTALLABLE_MODELS": "",
+            "LLM_PROVIDER": "ollama",
+            "LLM_MODEL": "",
+            "LLM_TIMEOUT": "",
+            "LLM_MAX_RETRIES": "",
+            "LLM_ALLOW_EXTERNAL": "false",
+            "LLM_TEMPERATURE": "0",
+            "LLM_PROVIDER_ENV": {"ollama": {"BASE_URL": "http://ollama:11434", "MODELS": "*"}},
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_default_pull_timeout(self):
+        settings = load_settings(self._ollama_cfg())
+        assert settings.providers[LLMProvider.ollama].pull_timeout == 120
+
+    def test_custom_pull_timeout(self):
+        settings = load_settings(self._ollama_cfg(OLLAMA_PULL_TIMEOUT=60))
+        assert settings.providers[LLMProvider.ollama].pull_timeout == 60
+
+    def test_invalid_pull_timeout_names_setting(self):
+        with pytest.raises(LLMConfigError, match="OLLAMA_PULL_TIMEOUT"):
+            load_settings(self._ollama_cfg(OLLAMA_PULL_TIMEOUT="fast"))
+
+    def test_empty_installable_uses_default_list(self):
+        from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS
+        settings = load_settings(self._ollama_cfg(OLLAMA_INSTALLABLE_MODELS=""))
+        assert settings.providers[LLMProvider.ollama].installable_models == DEFAULT_OLLAMA_INSTALLABLE_MODELS
+
+    def test_explicit_installable_models_parsed(self):
+        settings = load_settings(self._ollama_cfg(OLLAMA_INSTALLABLE_MODELS="llama3.2:3b, qwen2.5:7b"))
+        assert settings.providers[LLMProvider.ollama].installable_models == ("llama3.2:3b", "qwen2.5:7b")
+
+    def test_installable_models_deduplication(self):
+        settings = load_settings(self._ollama_cfg(OLLAMA_INSTALLABLE_MODELS="a:1b,a:1b,b:2b"))
+        assert settings.providers[LLMProvider.ollama].installable_models == ("a:1b", "b:2b")
+
+    def test_create_llm_passes_pull_timeout(self):
+        settings = load_settings(self._ollama_cfg(OLLAMA_PULL_TIMEOUT=45))
+        llm = create_llm(settings.providers[LLMProvider.ollama])
+        assert isinstance(llm, OllamaLLM)
+        assert llm.pull_timeout == 45
