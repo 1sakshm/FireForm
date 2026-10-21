@@ -40,6 +40,18 @@ Every LLM setting, as read from the env file. Empty means unset.
 | `OLLAMA_MODELS`  | `*`                      | Every pulled model. Empty turns Ollama off.                |
 | `OLLAMA_MODEL`   | `qwen2.5:1.5b`           | Ollama's default model, and the one `make fireform` pulls. |
 | `OLLAMA_TIMEOUT` | `300`                    | Fallback for `LLM_TIMEOUT`.                                |
+| `OLLAMA_PULL_TIMEOUT` | `120`               | Inactivity timeout while streaming a pull (seconds). Not a total time limit: the connect phase uses 10 seconds; each chunk from Ollama resets the inactivity clock. |
+| `OLLAMA_INSTALLABLE_MODELS` | empty (built-in default list) | Comma-separated models users may pull when `OLLAMA_MODELS=*`. Ignored when `OLLAMA_MODELS` is an explicit list; then only names in that list can be pulled. |
+
+## Ollama model states
+
+| Term | Meaning |
+| ---- | ------- |
+| **Default model** | `OLLAMA_MODEL` or `LLM_MODEL` when Ollama is the default provider. Used when a request names no model. |
+| **Allowed model** | Named in `OLLAMA_MODELS`, or any tag when `OLLAMA_MODELS=*`. |
+| **Installed** | Present on the Ollama host (`ollama list`). Shown in `models` with `installed: true`. |
+| **Loaded** | Loaded in memory right now. Ollama adds `loaded: true` on `models`. |
+| **Downloadable** | Allowed and not yet installed. Listed under `downloadable` on `GET /system/llm/models`. With `OLLAMA_MODELS=*`, candidates come from `OLLAMA_INSTALLABLE_MODELS` (or the built-in default). With an explicit list, downloadable entries are configured names Ollama does not have yet. |
 
 ## Provider defaults
 

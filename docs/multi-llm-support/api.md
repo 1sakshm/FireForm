@@ -21,8 +21,13 @@ Add `?refresh=true` to skip the cache. Lists are cached for 60 seconds, failures
           "name": "qwen2.5:1.5b",
           "size_gb": 0.92,
           "quantization": "Q4_K_M",
-          "loaded": false
+          "loaded": false,
+          "installed": true
         }
+      ],
+      "downloadable": [
+        { "name": "qwen2.5:3b", "installed": false },
+        { "name": "llama3.2:3b", "installed": false }
       ]
     },
     {
@@ -43,9 +48,41 @@ Add `?refresh=true` to skip the cache. Lists are cached for 60 seconds, failures
 ```
 
 - Only enabled providers appear.
-- Hosted models carry `name` only. Ollama adds `size_gb`, `quantization` and `loaded`.
-- With an explicit `_MODELS` list, names the provider does not offer are left out.
+- Hosted models carry `name` only. Ollama adds `size_gb`, `quantization`, `loaded`, and `installed`.
+- `downloadable` lists Ollama models that may be pulled but are not on the host yet (`installed: false`). It appears only for Ollama. Hosted providers omit `downloadable` and `installed`.
+- With an explicit `_MODELS` list, names the provider does not offer are left out of `models` and appear in `downloadable` (Ollama only).
 - Empty fields are left out of the response.
+
+## Pull an Ollama model
+
+`POST /api/v1/system/llm/pull`
+
+Streams Ollama `/api/pull` progress as **application/x-ndjson** (one JSON object per line). The body defaults `provider` to `ollama`.
+
+```json
+{ "model": "qwen2.5:3b" }
+```
+
+**HTTP 200 does not mean the pull succeeded.** Treat the stream as successful only when a line contains `"status":"success"`. An `"error"` field or a connection drop without that line is a failure, even though the status code is 200.
+
+Successful stream:
+
+```text
+{"status": "pulling manifest"}
+{"status": "downloading", "completed": 50, "total": 100}
+{"status": "success"}
+```
+
+Failed stream (still HTTP 200):
+
+```text
+{"status": "pulling manifest"}
+{"error": "pull access denied"}
+```
+
+If Ollama cannot be reached before the stream opens, the API returns **503** with `LLM_UNAVAILABLE`. Wrong provider, model not in the installable set, or an invalid model name returns **422**.
+
+After a successful pull, the server refreshes the Ollama catalog cache, so the new model shows up on `GET /system/llm/models` immediately (no need to wait 60 seconds or pass `refresh=true`).
 
 ## Test a model
 
