@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 from uuid import UUID
 
 from app.models.models import Profile
-from app.services.llm import append_profile_context
+from app.services.form_filler.filler import append_profile_context
 
 def test_profile_crud(client: TestClient, db: Session):
     # 1. TEST CREATE (POST)
