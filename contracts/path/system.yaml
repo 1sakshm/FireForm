@@ -4,6 +4,7 @@
 # GET /api/v1/schema/incident/versions
 # GET /api/v1/system/llm/models
 # POST /api/v1/system/llm/test
+# POST /api/v1/system/llm/pull
 
 health:
   get:
@@ -197,6 +198,12 @@ llm_models:
                       size_gb: 0.92
                       quantization: "Q4_K_M"
                       loaded: true
+                      installed: true
+                  downloadable:
+                    - name: "qwen2.5:3b"
+                      installed: false
+                    - name: "llama3.2:3b"
+                      installed: false
                 - provider: "gemini"
                   available: true
                   default_model: "gemini-2.5-flash"
@@ -281,3 +288,74 @@ llm_test:
             example:
               error_code: "LLM_CONFIG_ERROR"
               message: "GEMINI_API_KEY is set but GEMINI_MODELS is empty. Add GEMINI_MODELS=gemini-2.5-flash, a comma separated list, or * for every model gemini lists."
+
+llm_pull:
+  post:
+    operationId: pullLLMModel
+    summary: Pull an AI model from Ollama
+    description: |
+      Streams Ollama pull progress as newline-delimited JSON (application/x-ndjson).
+      HTTP 200 only means the stream started; a pull succeeded only when a line
+      contains `"status":"success"`. An `"error"` line or a truncated stream means
+      failure even though the response status is 200. The provider must be ollama
+      (default). The model must be allowed by OLLAMA_MODELS and, when
+      OLLAMA_MODELS=*, by OLLAMA_INSTALLABLE_MODELS. After a successful pull the
+      model catalog cache is refreshed so GET /system/llm/models lists the new
+      model without waiting for the cache TTL.
+    tags:
+      - system
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "../schemas/system.yaml#/LLMPullRequest"
+          example:
+            provider: "ollama"
+            model: "qwen2.5:3b"
+    responses:
+      "200":
+        description: Pull stream (success or failure is in the NDJSON lines)
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              description: One JSON object per line, as returned by Ollama /api/pull
+            examples:
+              success:
+                summary: Successful pull
+                value: |
+                  {"status": "pulling manifest"}
+                  {"status": "downloading", "completed": 50, "total": 100}
+                  {"status": "success"}
+              failed:
+                summary: Pull failed mid-stream
+                value: |
+                  {"status": "pulling manifest"}
+                  {"error": "pull access denied"}
+      "422":
+        description: Invalid model name, provider is not ollama, or model not installable
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            examples:
+              not_installable:
+                summary: Model not in the installable set
+                value:
+                  error_code: "LLM_NOT_AVAILABLE"
+                  message: "secret:model cannot be pulled. With OLLAMA_MODELS=*, allowed models are: qwen2.5:1.5b, qwen2.5:3b, qwen2.5:7b, llama3.2:3b."
+              validation:
+                summary: Invalid model name
+                value:
+                  error_code: "VALIDATION_ERROR"
+                  message: "Request validation failed"
+      "503":
+        description: Ollama could not be reached before the stream started
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_UNAVAILABLE"
+              message: "Could not reach Ollama at http://ollama:11434. Check OLLAMA_HOST: Connection refused"

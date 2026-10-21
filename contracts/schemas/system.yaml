@@ -87,6 +87,22 @@ LLMModel:
       type: boolean
       nullable: true
       description: Only Ollama reports this
+    installed:
+      type: boolean
+      nullable: true
+      description: True when the model is present on the Ollama host (Ollama only)
+
+DownloadableModel:
+  type: object
+  required:
+    - name
+    - installed
+  properties:
+    name:
+      type: string
+    installed:
+      type: boolean
+      description: Always false in downloadable; the model is not on Ollama yet
 
 LLMModelChoice:
   type: object
@@ -135,6 +151,27 @@ LLMProviderModels:
         out of the response, here and on the provider.
       items:
         $ref: "#/LLMModel"
+    downloadable:
+      type: array
+      nullable: true
+      description: Ollama models that may be pulled but are not installed yet.
+        Omitted for non-Ollama providers and when empty.
+      items:
+        $ref: "#/DownloadableModel"
+
+LLMPullRequest:
+  type: object
+  required:
+    - model
+  properties:
+    model:
+      type: string
+      description: Ollama model tag to pull
+    provider:
+      type: string
+      nullable: true
+      default: ollama
+      description: Must be ollama; other providers are rejected
 
 LLMModels:
   type: object
