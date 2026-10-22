@@ -213,6 +213,8 @@ class TemplateService:
         # Only the fields sent are changed; pdf_path stays as it was.
         if changes.name is not None:
             template.name = changes.name
+        if changes.description is not None:
+            template.description = changes.description
         if changes.fields is not None:
             template.fields = changes.fields
         updated = update_template(session, template)

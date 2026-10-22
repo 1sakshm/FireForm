@@ -208,6 +208,47 @@ class TestTemplateEndpoints:
         assert resp.json()["field_count"] == 2
         assert client.get(f"{API_PREFIX}/templates").json()[0]["name"] == "T2"
 
+    def test_update_template_description(self, client, db, mock_controller):
+        """PUT /templates/{id} persists a new description."""
+        tpl = Template(
+            name="ICS 205",
+            description="Original radio plan",
+            pdf_path="a.pdf",
+            fields={"f": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        resp = client.put(
+            f"{API_PREFIX}/templates/{tpl.id}",
+            json={"description": "Updated ICS 205 radio plan"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "Updated ICS 205 radio plan"
+        assert resp.json()["name"] == "ICS 205"
+        assert resp.json()["fields"] == {"f": "string"}
+        assert client.get(f"{API_PREFIX}/templates").json()[0]["description"] == (
+            "Updated ICS 205 radio plan"
+        )
+
+    def test_update_keeps_description_when_omitted(self, client, db, mock_controller):
+        """A name-only PUT must not clear an existing description."""
+        tpl = Template(
+            name="ICS 205",
+            description="Keep this comms plan",
+            pdf_path="a.pdf",
+            fields={"f": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        resp = client.put(f"{API_PREFIX}/templates/{tpl.id}", json={"name": "ICS 205A"})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "ICS 205A"
+        assert resp.json()["description"] == "Keep this comms plan"
+
     def test_update_missing_template(self, client):
         resp = client.put(f"{API_PREFIX}/templates/9999", json={"name": "T2"})
         assert resp.status_code == 404
@@ -299,6 +340,42 @@ class TestFormEndpoints:
         assert fetched.input_text == "Direct incident text narrative from user."
         assert fetched.input_id is not None
 
+    def test_fill_form_uses_description_from_update(
+        self, client, mock_controller, db, tmp_path, monkeypatch
+    ):
+        """A description saved via PUT /templates/{id} reaches the filler."""
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "ics_205.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+        tpl = Template(
+            name="ICS 205",
+            description="",
+            pdf_path="ics_205.pdf",
+            fields={"Incident Name": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        updated = client.put(
+            f"{API_PREFIX}/templates/{tpl.id}",
+            json={"description": "Incident radio communications plan"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["description"] == "Incident radio communications plan"
+
+        resp = client.post(
+            f"{API_PREFIX}/forms/fill",
+            json={
+                "template_id": tpl.id,
+                "input_text": "Command uses channel 3 for the Oak Ridge fire.",
+            },
+        )
+        assert resp.status_code == 200
+
+        mock_fill = mock_controller["mock_fill"]
+        mock_fill.assert_called_once()
+        assert mock_fill.call_args.kwargs["description"] == "Incident radio communications plan"
 
     def test_fill_form_missing_template(self, client, mock_controller):
         resp = client.post(f"{API_PREFIX}/forms/fill", json={

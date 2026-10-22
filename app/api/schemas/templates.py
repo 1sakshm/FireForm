@@ -9,6 +9,7 @@ class TemplateCreate(BaseModel):
 
 class TemplateUpdate(BaseModel):
     name: str | None = None
+    description: str | None = None
     fields: dict | None = None
 
 
