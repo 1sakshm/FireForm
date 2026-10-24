@@ -2,6 +2,10 @@
 
 Contract: `contracts/path/system.yaml` and `contracts/path/forms.yaml`.
 
+Provider credentials, custom endpoints, external-processing consent, and
+manually entered model IDs can also be managed through the endpoints described
+in [User configuration](user-configuration.md).
+
 ## List providers and models
 
 `GET /api/v1/system/llm/models`
@@ -133,6 +137,8 @@ The pair is checked before anything is stored or queued. For jobs, the provider 
 | `LLM_BAD_RESPONSE`    | 502  | The provider refused the request or did not return JSON.               |
 | `LLM_UNAVAILABLE`     | 503  | Could not reach the provider, or it timed out.                         |
 | `LLM_RATE_LIMITED`    | 503  | Still rate limited after retries, or out of quota.                     |
+| `LLM_SECRET_KEY_UNAVAILABLE` | 503 | The API cannot read or create the credential-encryption master key. |
+| `LLM_EXTERNAL_CONSENT_REQUIRED` | 422 | External-processing consent is required before saving a remote provider. |
 
 Every error body has `error_code` and `message`. 503 responses add `retry_after_seconds`. Failed jobs store the same code and message in `error`.
 
