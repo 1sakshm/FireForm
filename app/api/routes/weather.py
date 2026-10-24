@@ -1,4 +1,7 @@
-from fastapi import APIRouter
+from datetime import date
+
+from fastapi import APIRouter, Query
+from fastapi.exceptions import RequestValidationError
 
 from app.core.errors.base import AppError
 from app.services.external_apis.weather_api import WeatherAPI
@@ -21,10 +24,10 @@ ALL_HOURLY_FIELDS = [
 
 @router.get("/forecast")
 def get_weather_forecast(
-    latitude: float,
-    longitude: float,
-    start_date: str,
-    end_date: str,
+    latitude: float = Query(..., ge=-90, le=90),
+    longitude: float = Query(..., ge=-180, le=180),
+    start_date: date = Query(...),
+    end_date: date = Query(...),
     fields: str | None = None,
 ):
     """
@@ -33,10 +36,24 @@ def get_weather_forecast(
     Coordinates must be supplied as **decimal degrees** — not degree/minute/second notation. E.g. -122.4194, 37.7749.
     Dates must use the **YYYY-MM-DD** format (ISO 8601).
     """
+    if end_date < start_date:
+        raise RequestValidationError(
+            errors=[
+                {
+                    "loc": ("query", "end_date"),
+                    "msg": "end_date must not be before start_date",
+                    "input": end_date.isoformat(),
+                    "type": "value_error",
+                }
+            ]
+        )
+
     weather_api = WeatherAPI()
     try:
         requested = [f.strip() for f in fields.split(",") if f.strip()] if fields else []
-        weather_data = weather_api.get_weather(latitude, longitude, start_date, end_date, hourly_fields=requested)
+        weather_data = weather_api.get_weather(
+            latitude, longitude, start_date.isoformat(), end_date.isoformat(), hourly_fields=requested
+        )
         return weather_data
     except Exception as e:
         raise AppError(str(e), status_code=500)
