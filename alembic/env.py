@@ -22,7 +22,9 @@ config = context.config
 if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-if config.config_file_name is not None:
+# The app runs migrations at startup and keeps its own logging setup. Applying
+# alembic.ini there would silence every app logger below WARN.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 target_metadata = SQLModel.metadata

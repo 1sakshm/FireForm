@@ -2,13 +2,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from app.api.schemas.enums import JobStatus, JobType
+from app.api.schemas.enums import JobStatus, JobType, LLMProvider
 
 
 class FormFill(BaseModel):
     template_id: int
     input_text: str | None = None
     input_id: UUID | None = None
+    provider: LLMProvider | None = None
     model: str | None = None
 
 
@@ -34,6 +35,7 @@ class ModelsResponse(BaseModel):
 class AsyncFormFill(BaseModel):
     template_ids: list[int]
     input_id: UUID
+    provider: LLMProvider | None = None
     model: str | None = None
 
     @field_validator("template_ids")

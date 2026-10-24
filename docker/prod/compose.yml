@@ -80,9 +80,6 @@ services:
       - CUDA_VISIBLE_DEVICES=
       - PYTHONPATH=/app
       - DATABASE_URL=${DATABASE_URL}
-      - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT}
-      - OLLAMA_MODEL=${OLLAMA_MODEL}
       - WHISPER_HOST=${WHISPER_HOST}
       - FIREFORM_DATA_DIR=/app/data
       - FIREFORM_TEMPLATE_DIR=data/inputs
@@ -110,14 +107,14 @@ services:
     command: ["celery", "-A", "app.core.celery:celery_app", "worker", "--loglevel=info", "--concurrency=4"]
     volumes:
       - fireform_uploads:/app/data
+    # Same env file as the app, so the worker sees the same LLM providers
+    env_file:
+      - ../.env.prod
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=
       - PYTHONPATH=/app
       - DATABASE_URL=${DATABASE_URL}
-      - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT}
-      - OLLAMA_MODEL=${OLLAMA_MODEL}
       - WHISPER_HOST=${WHISPER_HOST}
       - FIREFORM_DATA_DIR=/app/data
       - FIREFORM_TEMPLATE_DIR=data/inputs

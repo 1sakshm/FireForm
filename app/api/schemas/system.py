@@ -1,13 +1,15 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from app.api.schemas.enums import HealthState
+from app.api.schemas.enums import HealthState, LLMProvider
 
 
 class ModelInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     name: str
-    size_gb: float
+    size_gb: float | None = None
     quantization: str | None = None
-    loaded: bool
+    loaded: bool | None = None
 
 
 class CurrentLoad(BaseModel):
@@ -19,8 +21,9 @@ class ComponentHealth(BaseModel):
     status: HealthState
     response_time_ms: int | None = None
     detail: str | None = None
+    provider: LLMProvider | None = None  # llm component only
     model_loaded: str | None = None
-    ollama_version: str | None = None
+    provider_version: str | None = None
     models_available: list[ModelInfo] | None = None
     current_load: CurrentLoad | None = None
     disk_free_gb: float | None = None
@@ -28,7 +31,7 @@ class ComponentHealth(BaseModel):
 
 class HealthComponents(BaseModel):
     database: ComponentHealth
-    ollama: ComponentHealth
+    llm: ComponentHealth
     whisper: ComponentHealth
     storage: ComponentHealth
 
@@ -38,6 +41,45 @@ class HealthStatus(BaseModel):
     version: str
     uptime_seconds: int | None = None
     components: HealthComponents | None = None
+
+
+class LLMModelChoice(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    model: str
+
+
+class LLMProviderModels(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    available: bool
+    default_model: str | None = None
+    detail: str | None = None
+    error_code: str | None = None
+    models: list[ModelInfo]
+
+
+class LLMModels(BaseModel):
+    default: LLMModelChoice
+    providers: list[LLMProviderModels]
+
+
+class LLMTestRequest(BaseModel):
+    provider: LLMProvider | None = None
+    model: str | None = None
+
+
+class LLMTestResult(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: LLMProvider
+    model: str
+    ok: bool
+    latency_ms: int | None = None
+    detail: str | None = None
+    error_code: str | None = None
 
 
 class SchemaVersion(BaseModel):

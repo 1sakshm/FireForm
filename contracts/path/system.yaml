@@ -2,16 +2,20 @@
 # GET /api/v1/health
 # GET /api/v1/schema/incident
 # GET /api/v1/schema/incident/versions
+# GET /api/v1/system/llm/models
+# POST /api/v1/system/llm/test
 
 health:
   get:
     operationId: getHealth
     summary: System health check
     description: |
-      Returns the health status of all FireForm components — database, Ollama LLM
-      (including loaded models, GPU status, and current load), Whisper transcription,
-      and file storage. Returns 200 even when degraded (so load balancers don't kill
-      it), 503 only if the system is truly unhealthy and cannot serve any requests.
+      Returns the health status of all FireForm components: database, the
+      default LLM provider (Ollama, OpenAI, Gemini, Anthropic or a custom
+      OpenAI compatible server), Whisper transcription, and file storage.
+      GET /system/llm/models covers every enabled provider.
+      Returns 200 even when degraded (so load balancers don't kill it), 503
+      only if the system is truly unhealthy and cannot serve any requests.
     tags:
       - system
     responses:
@@ -32,11 +36,12 @@ health:
                     database:
                       status: "healthy"
                       response_time_ms: 2
-                    ollama:
+                    llm:
                       status: "healthy"
                       response_time_ms: 15
+                      provider: "ollama"
                       model_loaded: "llama3:8b"
-                      ollama_version: "0.3.0"
+                      provider_version: "0.3.0"
                       models_available:
                         - name: "llama3:8b"
                           size_gb: 4.7
@@ -65,9 +70,10 @@ health:
                     database:
                       status: "healthy"
                       response_time_ms: 2
-                    ollama:
+                    llm:
                       status: "degraded"
                       response_time_ms: 5000
+                      provider: "ollama"
                       detail: "High latency model may be loading"
                       current_load:
                         active_requests: 3
@@ -92,8 +98,9 @@ health:
                 database:
                   status: "unhealthy"
                   detail: "Connection refused"
-                ollama:
+                llm:
                   status: "unhealthy"
+                  provider: "ollama"
                   detail: "Connection refused"
 
 schema_incident:
@@ -150,3 +157,127 @@ schema_versions:
                 released_at: "2024-01-01T00:00:00Z"
                 changelog: "Initial canonical schema with NFIRS support."
                 breaking_changes: false
+
+llm_models:
+  get:
+    operationId: listLLMModels
+    summary: List the LLM providers and models that can fill forms
+    description: |
+      Every enabled provider with the models it can run. A provider is enabled
+      when its <PROVIDER>_MODELS setting is not empty and its key or URL is set.
+      Hosted providers only show up when LLM_ALLOW_EXTERNAL is true. The list is
+      cached for a minute, refresh=true reads it again from each provider.
+    tags:
+      - system
+    parameters:
+      - name: refresh
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+        description: Skip the cache and ask every provider again
+    responses:
+      "200":
+        description: Enabled providers and their models
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/system.yaml#/LLMModels"
+            example:
+              default:
+                provider: "ollama"
+                model: "qwen2.5:1.5b"
+              providers:
+                - provider: "ollama"
+                  available: true
+                  default_model: "qwen2.5:1.5b"
+                  models:
+                    - name: "qwen2.5:1.5b"
+                      size_gb: 0.92
+                      quantization: "Q4_K_M"
+                      loaded: true
+                - provider: "gemini"
+                  available: true
+                  default_model: "gemini-2.5-flash"
+                  models:
+                    - name: "gemini-2.5-flash"
+                    - name: "gemini-2.5-pro"
+                - provider: "anthropic"
+                  available: false
+                  default_model: "claude-sonnet-4-5"
+                  detail: "anthropic rejected the API key: Invalid Anthropic API Key. Check ANTHROPIC_API_KEY."
+                  error_code: "LLM_AUTH_FAILED"
+                  models: []
+      "500":
+        description: The LLM settings are wrong. message names the setting and the fix.
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_CONFIG_ERROR"
+              message: "GEMINI_API_KEY is set but GEMINI_MODELS is empty. Add GEMINI_MODELS=gemini-2.5-flash, a comma separated list, or * for every model gemini lists."
+
+llm_test:
+  post:
+    operationId: testLLMModel
+    summary: Check that a model actually answers
+    description: |
+      Sends a short prompt to the model and checks it comes back as valid
+      JSON. Use it after changing provider settings, or to confirm a model
+      before picking it. A model that fails returns 200 with ok false and the
+      reason, so the client can show it.
+    tags:
+      - system
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: "../schemas/system.yaml#/LLMTestRequest"
+          example:
+            provider: "gemini"
+            model: "gemini-2.5-flash"
+    responses:
+      "200":
+        description: The test ran. ok says whether the model answered.
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/system.yaml#/LLMTestResult"
+            examples:
+              ok:
+                summary: Model answered
+                value:
+                  provider: "gemini"
+                  model: "gemini-2.5-flash"
+                  ok: true
+                  latency_ms: 840
+              failed:
+                summary: Model did not answer
+                value:
+                  provider: "ollama"
+                  model: "llama3:8b"
+                  ok: false
+                  latency_ms: 12
+                  detail: "Ollama has no model llama3:8b. Pull it with: ollama pull llama3:8b"
+                  error_code: "LLM_MODEL_NOT_FOUND"
+      "422":
+        description: The provider or model is not one GET /system/llm/models lists
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_NOT_AVAILABLE"
+              message: "openai is not enabled on this server."
+      "500":
+        description: The LLM settings are wrong. message names the setting and the fix.
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_CONFIG_ERROR"
+              message: "GEMINI_API_KEY is set but GEMINI_MODELS is empty. Add GEMINI_MODELS=gemini-2.5-flash, a comma separated list, or * for every model gemini lists."

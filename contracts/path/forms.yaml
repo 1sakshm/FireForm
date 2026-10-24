@@ -9,7 +9,7 @@ fill:
     description: |
       Takes the transcript stored on a prior input (see POST /input/text or
       POST /input/voice) plus one template's field dictionary, sends them to
-      the local Ollama LLM to get values back field-by-field, then draws those
+      the chosen LLM to get values back field-by-field, then draws those
       values into the template's PDF boxes. Runs synchronously: one LLM pass
       per call. The referenced input must have status "ready".
     tags:
@@ -23,6 +23,7 @@ fill:
           example:
             template_id: 3
             input_id: "550e8400-e29b-41d4-a716-446655440001"
+            provider: "ollama"
             model: "llama3.1"
     responses:
       "200":
@@ -56,6 +57,35 @@ fill:
               message: "Input 550e8400-e29b-41d4-a716-446655440001 is not ready (status: transcribing)"
               detail:
                 status: "transcribing"
+      "422":
+        description: The provider or model is not one GET /system/llm/models lists
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_NOT_AVAILABLE"
+              message: "gemini does not offer gemini-x. Pick one GET /system/llm/models lists."
+      "502":
+        description: The LLM refused. error_code is LLM_AUTH_FAILED, LLM_MODEL_NOT_FOUND
+          or LLM_BAD_RESPONSE, and message says what to fix.
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_AUTH_FAILED"
+              message: "gemini rejected the API key: Please pass a valid API key. Check GEMINI_API_KEY."
+      "503":
+        description: The LLM can't be reached, timed out, or is rate limited
+          (LLM_UNAVAILABLE, LLM_RATE_LIMITED)
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_UNAVAILABLE"
+              message: "Could not reach Ollama at http://ollama:11434. Check OLLAMA_HOST."
       "500":
         description: Form fill failed (LLM or PDF generation error)
         content:
@@ -87,6 +117,7 @@ async_fill:
           example:
             template_ids: [3, 7]
             input_id: "550e8400-e29b-41d4-a716-446655440001"
+            provider: "ollama"
             model: "llama3.1"
     responses:
       "200":
@@ -123,3 +154,12 @@ async_fill:
               message: "Input 550e8400-e29b-41d4-a716-446655440001 is not ready (status: transcribing)"
               detail:
                 status: "transcribing"
+      "422":
+        description: The provider or model is not one GET /system/llm/models lists
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/common.yaml#/ErrorResponse"
+            example:
+              error_code: "LLM_NOT_AVAILABLE"
+              message: "gemini does not offer gemini-x. Pick one GET /system/llm/models lists."
