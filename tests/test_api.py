@@ -117,6 +117,7 @@ class TestTemplateEndpoints:
         data = resp.json()
         assert data["id"] is not None
         assert data["name"] == "Fire Report"
+        assert data["description"] == "Fire incident report"
         # Fields passed explicitly are persisted as-is (extract_pdf_template not called)
         assert data["fields"]["Location"] == "string"
         mock_controller["mock_extract"].assert_not_called()
@@ -133,6 +134,7 @@ class TestTemplateEndpoints:
         assert resp.status_code == 200
         assert len(resp.json()) == 1
         assert resp.json()[0]["name"] == "T1"
+        assert resp.json()[0]["description"] == "Test form template"
 
     def test_upload_pdf(self, client, pdf_upload, tmp_path, monkeypatch):
         """Upload a valid PDF file."""
@@ -298,6 +300,29 @@ class TestFormEndpoints:
         assert fetched is not None
         assert fetched.input_text == "Direct incident text narrative from user."
         assert fetched.input_id is not None
+
+    def test_fill_form_uses_description_from_create(self, client, mock_controller, tmp_path, monkeypatch):
+        """The description given to POST /templates/create reaches the filler."""
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "ics_205.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+        created = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "ICS 205",
+            "description": "Incident radio communications plan",
+            "pdf_path": "ics_205.pdf",
+            "fields": {"Incident Name": "string"},
+        })
+        assert created.status_code == 200
+
+        resp = client.post(f"{API_PREFIX}/forms/fill", json={
+            "template_id": created.json()["id"],
+            "input_text": "Command uses channel 3 for the Oak Ridge fire.",
+        })
+        assert resp.status_code == 200
+
+        mock_fill = mock_controller["mock_fill"]
+        mock_fill.assert_called_once()
+        assert mock_fill.call_args.kwargs["description"] == "Incident radio communications plan"
 
 
     def test_fill_form_missing_template(self, client, mock_controller):
