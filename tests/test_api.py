@@ -6,6 +6,8 @@ All heavy dependencies (LLM, commonforms, filesystem) are mocked via conftest.
 
 from uuid import uuid4
 
+import pytest
+
 from sqlmodel import select
 
 from app.api.schemas.enums import InputStatus, InputType
@@ -117,6 +119,7 @@ class TestTemplateEndpoints:
         data = resp.json()
         assert data["id"] is not None
         assert data["name"] == "Fire Report"
+        assert data["description"] == "Fire incident report"
         # Fields passed explicitly are persisted as-is (extract_pdf_template not called)
         assert data["fields"]["Location"] == "string"
         mock_controller["mock_extract"].assert_not_called()
@@ -133,6 +136,7 @@ class TestTemplateEndpoints:
         assert resp.status_code == 200
         assert len(resp.json()) == 1
         assert resp.json()[0]["name"] == "T1"
+        assert resp.json()[0]["description"] == "Test form template"
 
     def test_upload_pdf(self, client, pdf_upload, tmp_path, monkeypatch):
         """Upload a valid PDF file."""
@@ -207,6 +211,47 @@ class TestTemplateEndpoints:
         assert resp.json()["fields"] == {"g": "string", "h": "string"}
         assert resp.json()["field_count"] == 2
         assert client.get(f"{API_PREFIX}/templates").json()[0]["name"] == "T2"
+
+    def test_update_template_description(self, client, db, mock_controller):
+        """PUT /templates/{id} persists a new description."""
+        tpl = Template(
+            name="ICS 205",
+            description="Original radio plan",
+            pdf_path="a.pdf",
+            fields={"f": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        resp = client.put(
+            f"{API_PREFIX}/templates/{tpl.id}",
+            json={"description": "Updated ICS 205 radio plan"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "Updated ICS 205 radio plan"
+        assert resp.json()["name"] == "ICS 205"
+        assert resp.json()["fields"] == {"f": "string"}
+        assert client.get(f"{API_PREFIX}/templates").json()[0]["description"] == (
+            "Updated ICS 205 radio plan"
+        )
+
+    def test_update_keeps_description_when_omitted(self, client, db, mock_controller):
+        """A name-only PUT must not clear an existing description."""
+        tpl = Template(
+            name="ICS 205",
+            description="Keep this comms plan",
+            pdf_path="a.pdf",
+            fields={"f": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        resp = client.put(f"{API_PREFIX}/templates/{tpl.id}", json={"name": "ICS 205A"})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "ICS 205A"
+        assert resp.json()["description"] == "Keep this comms plan"
 
     def test_update_missing_template(self, client):
         resp = client.put(f"{API_PREFIX}/templates/9999", json={"name": "T2"})
@@ -298,6 +343,60 @@ class TestFormEndpoints:
         assert fetched is not None
         assert fetched.input_text == "Direct incident text narrative from user."
         assert fetched.input_id is not None
+
+    def test_fill_form_uses_description_from_update(
+        self, client, mock_controller, db, tmp_path, monkeypatch
+    ):
+        """A description saved via PUT /templates/{id} reaches the filler."""
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "ics_205.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+        tpl = Template(
+            name="ICS 205",
+            description="",
+            pdf_path="ics_205.pdf",
+            fields={"Incident Name": "string"},
+        )
+        db.add(tpl)
+        db.commit()
+        db.refresh(tpl)
+
+        updated = client.put(
+            f"{API_PREFIX}/templates/{tpl.id}",
+            json={"description": "Incident radio communications plan"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["description"] == "Incident radio communications plan"
+
+        resp = client.post(
+            f"{API_PREFIX}/forms/fill",
+            json={
+                "template_id": tpl.id,
+                "input_text": "Command uses channel 3 for the Oak Ridge fire.",
+            },
+        )
+    def test_fill_form_uses_description_from_create(self, client, mock_controller, tmp_path, monkeypatch):
+        """The description given to POST /templates/create reaches the filler."""
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "ics_205.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+        created = client.post(f"{API_PREFIX}/templates/create", json={
+            "name": "ICS 205",
+            "description": "Incident radio communications plan",
+            "pdf_path": "ics_205.pdf",
+            "fields": {"Incident Name": "string"},
+        })
+        assert created.status_code == 200
+
+        resp = client.post(f"{API_PREFIX}/forms/fill", json={
+            "template_id": created.json()["id"],
+            "input_text": "Command uses channel 3 for the Oak Ridge fire.",
+        })
+        assert resp.status_code == 200
+
+        mock_fill = mock_controller["mock_fill"]
+        mock_fill.assert_called_once()
+        assert mock_fill.call_args.kwargs["description"] == "Incident radio communications plan"
 
 
     def test_fill_form_missing_template(self, client, mock_controller):
@@ -478,6 +577,62 @@ class TestFormEndpoints:
         assert body["error_code"] == "FILE_TOO_LARGE"
         assert body["detail"]["max_size_bytes"] == 5
         assert body["detail"]["received_size_bytes"] == 8
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Weather endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWeatherEndpoints:
+
+    WEATHER_URL = f"{API_PREFIX}/weather/forecast"
+    VALID = {"latitude": 37.77, "longitude": -122.42, "start_date": "2026-10-19", "end_date": "2026-10-20"}
+
+    def _no_upstream_call(self, monkeypatch):
+        def fake_get_weather(*args, **kwargs):
+            raise AssertionError("Open-Meteo should not be called for invalid input")
+
+        monkeypatch.setattr(
+            "app.api.routes.weather.WeatherAPI.get_weather", fake_get_weather
+        )
+
+    def test_forecast_valid_request(self, client, monkeypatch):
+        captured = {}
+
+        def fake_get_weather(self, latitude, longitude, start_date, end_date, hourly_fields=None):
+            captured.update(latitude=latitude, longitude=longitude, start_date=start_date, end_date=end_date)
+            return {"hourly": {}}
+
+        monkeypatch.setattr("app.api.routes.weather.WeatherAPI.get_weather", fake_get_weather)
+
+        resp = client.get(self.WEATHER_URL, params=self.VALID)
+        assert resp.status_code == 200
+        assert captured == {
+            "latitude": 37.77,
+            "longitude": -122.42,
+            "start_date": "2026-10-19",
+            "end_date": "2026-10-20",
+        }
+
+    @pytest.mark.parametrize(
+        "overrides, field",
+        [
+            ({"latitude": 200}, "query.latitude"),
+            ({"latitude": -90.5}, "query.latitude"),
+            ({"longitude": 181}, "query.longitude"),
+            ({"start_date": "tomorrow"}, "query.start_date"),
+            ({"end_date": "2026-13-01"}, "query.end_date"),
+            ({"start_date": "2026-10-22", "end_date": "2026-10-19"}, "query.end_date"),
+        ],
+    )
+    def test_forecast_invalid_params_rejected(self, client, monkeypatch, overrides, field):
+        self._no_upstream_call(monkeypatch)
+
+        resp = client.get(self.WEATHER_URL, params={**self.VALID, **overrides})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["validation_errors"][0]["field"] == field
 
 
 # ═══════════════════════════════════════════════════════════════════════════
