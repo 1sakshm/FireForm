@@ -134,6 +134,7 @@ class LLMProviderCredentialStatus(BaseModel):
     key_hint: str | None = None
     enabled: bool
     external: bool
+    credential_status: Literal["available", "unavailable"] | None = None
     base_url: str | None = None
     structured_output: bool | None = None
 

@@ -28,9 +28,14 @@ EDITABLE_PROVIDERS = frozenset({
     LLMProvider.custom,
 })
 _cache_lock = threading.Lock()
+_credential_state_lock = threading.Lock()
 _cached_registry: LLMRegistry | None = None
 _cached_fingerprint: tuple | None = None
+_cache_checked_at = 0.0
+_REGISTRY_CHECK_SECONDS = 3.0
+_BASE_CONFIG_FINGERPRINT = ("base-config",)
 _invalid_credentials: set[str] = set()
+_warned_credential_errors: dict[str, str] = {}
 
 
 def _fernet(*, create: bool = False) -> Fernet:
@@ -112,19 +117,32 @@ def encrypt_api_key(value: str) -> str:
 def decrypt_api_key(value: str, provider: str) -> str | None:
     try:
         decrypted = _fernet().decrypt(value.encode("ascii")).decode("utf-8")
-        _invalid_credentials.discard(provider)
+        with _credential_state_lock:
+            _invalid_credentials.discard(provider)
+            _warned_credential_errors.pop(provider, None)
         return decrypted
     except LLMSecretKeyError:
-        _invalid_credentials.add(provider)
-        logger.warning("Stored API key for %s cannot be decrypted because LLM_SECRET_KEY is unavailable.", provider)
+        with _credential_state_lock:
+            _invalid_credentials.add(provider)
+        _warn_credential_error(provider, value, "LLM_SECRET_KEY is unavailable")
     except (InvalidToken, UnicodeDecodeError, ValueError):
-        _invalid_credentials.add(provider)
-        logger.warning("Stored API key for %s cannot be decrypted; ignoring the saved credential.", provider)
+        with _credential_state_lock:
+            _invalid_credentials.add(provider)
+        _warn_credential_error(provider, value, "ignoring the saved credential")
     return None
 
 
+def _warn_credential_error(provider: str, encrypted_value: str, reason: str) -> None:
+    with _credential_state_lock:
+        if _warned_credential_errors.get(provider) == encrypted_value:
+            return
+        _warned_credential_errors[provider] = encrypted_value
+    logger.warning("Stored API key for %s cannot be decrypted; %s.", provider, reason)
+
+
 def has_decryptable_credential(provider: str) -> bool:
-    return provider not in _invalid_credentials
+    with _credential_state_lock:
+        return provider not in _invalid_credentials
 
 
 def validate_provider(provider: LLMProvider) -> None:
@@ -161,8 +179,17 @@ def registry_for_candidate(
 
 def effective_registry(session: Session) -> LLMRegistry:
     """Return a process-local registry rebuilt when persisted provider state changes."""
-    global _cached_registry, _cached_fingerprint
+    global _cache_checked_at, _cached_registry, _cached_fingerprint
     with _cache_lock:
+        now = time.monotonic()
+        if now - _cache_checked_at < _REGISTRY_CHECK_SECONDS:
+            if _cached_fingerprint == _BASE_CONFIG_FINGERPRINT:
+                from app.services import llm
+
+                return llm.get_registry()
+            if _cached_registry is not None:
+                return _cached_registry
+
         credentials = session.exec(select(LLMProviderCredential)).all()
         manual_models = session.exec(select(LLMManualModel)).all()
         runtime_config = session.get(LLMRuntimeConfig, 1)
@@ -171,7 +198,8 @@ def effective_registry(session: Session) -> LLMRegistry:
             from app.services import llm
 
             _cached_registry = None
-            _cached_fingerprint = None
+            _cached_fingerprint = _BASE_CONFIG_FINGERPRINT
+            _cache_checked_at = now
             return llm.get_registry()
 
         fingerprint = (
@@ -181,6 +209,7 @@ def effective_registry(session: Session) -> LLMRegistry:
             allow_external,
         )
         if fingerprint == _cached_fingerprint and _cached_registry is not None:
+            _cache_checked_at = now
             return _cached_registry
 
         _cached_registry = _build_registry(
@@ -189,14 +218,16 @@ def effective_registry(session: Session) -> LLMRegistry:
             allow_external,
         )
         _cached_fingerprint = fingerprint
+        _cache_checked_at = now
         return _cached_registry
 
 
 def invalidate_registry_cache() -> None:
-    global _cached_registry, _cached_fingerprint
+    global _cache_checked_at, _cached_registry, _cached_fingerprint
     with _cache_lock:
         _cached_registry = None
         _cached_fingerprint = None
+        _cache_checked_at = 0.0
 
 
 def _build_registry(

@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.api.schemas.enums import LLMProvider
 from app.services.llm.base import DownloadableModelInfo, LLM, ModelInfo
@@ -176,7 +176,10 @@ class LLMRegistry:
         if settings.manual_models:
             offered_by_name = {model.name: model for model in offered}
             for name in settings.manual_models:
-                offered_by_name.setdefault(name, ModelInfo(name=name, manual=True))
+                if name in offered_by_name:
+                    offered_by_name[name] = replace(offered_by_name[name], manual=True)
+                else:
+                    offered_by_name[name] = ModelInfo(name=name, manual=True)
             offered = list(offered_by_name.values())
         kept, missing = settings.models.pick(offered)
         offered_names = {m.name for m in offered}

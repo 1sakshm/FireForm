@@ -74,6 +74,9 @@ def get_provider_configs(db: Session = Depends(get_db)):
                 key_hint=key_hint,
                 enabled=provider in enabled,
                 external=_is_external_url(base_url) if base_url else False,
+                credential_status=(
+                    "available" if has_decryptable_credential(provider.value) else "unavailable"
+                ) if record and record.api_key_encrypted else None,
                 base_url=_display_base_url(base_url) if provider is LLMProvider.custom else None,
                 structured_output=(
                     record.structured_output
@@ -359,5 +362,7 @@ def _require_external_consent(db: Session, provider: LLMProvider, base_url: str)
         )
 
 
-def _redact(message: str, secret: str) -> str:
-    return message.replace(secret, "[redacted]") if secret else message
+def _redact(message: str, secret: object) -> str:
+    if isinstance(secret, str) and len(secret) >= 8 and secret != "not-needed":
+        return message.replace(secret, "[redacted]")
+    return message
