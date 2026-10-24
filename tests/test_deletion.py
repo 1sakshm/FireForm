@@ -80,6 +80,37 @@ class TestDeleteTemplate:
         client.delete(f"{API_PREFIX}/templates/{tpl_id}")
         assert not pdf_file.exists()
 
+    def test_delete_template_keeps_pdf_shared_with_another_template(self, client, db, tmp_path, monkeypatch):
+        """A PDF still referenced by another template is not removed."""
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        pdf_file = tmp_path / "shared.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+
+        first_id = _seed_template(client, name="First", pdf_path="shared.pdf")
+        second_id = _seed_template(client, name="Second", pdf_path="shared.pdf")
+
+        client.delete(f"{API_PREFIX}/templates/{first_id}")
+        assert pdf_file.exists()
+        assert db.get(Template, second_id) is not None
+
+        # Once the last template using it is gone, the PDF is removed too
+        client.delete(f"{API_PREFIX}/templates/{second_id}")
+        assert not pdf_file.exists()
+
+    def test_delete_template_keeps_seed_pdf(self, client, tmp_path, monkeypatch):
+        """The bundled seed PDF is never removed, even with no other template using it."""
+        from app.core.config import SEED_TEMPLATE_PDF_PATH
+
+        monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
+        seed_pdf = tmp_path / SEED_TEMPLATE_PDF_PATH
+        seed_pdf.parent.mkdir(parents=True)
+        seed_pdf.write_bytes(b"%PDF-1.4 seed")
+
+        tpl_id = _seed_template(client, pdf_path=SEED_TEMPLATE_PDF_PATH)
+
+        client.delete(f"{API_PREFIX}/templates/{tpl_id}")
+        assert seed_pdf.exists()
+
     def test_delete_template_deletes_submission_output_pdfs(self, client, db, tmp_path, monkeypatch):
         """Output PDFs of related submissions should be wiped on template deletion."""
         monkeypatch.setattr("app.core.paths.PROJECT_ROOT", tmp_path)
