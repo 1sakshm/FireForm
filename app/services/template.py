@@ -140,7 +140,12 @@ class TemplateService:
             except Exception:
                 fields = {}
 
-        tpl = Template(name=template.name, pdf_path=template.pdf_path, fields=fields)
+        tpl = Template(
+            name=template.name,
+            description=template.description,
+            pdf_path=template.pdf_path,
+            fields=fields,
+        )
         created = create_template(session, tpl)
         return TemplateResponse(
             id=created.id,
