@@ -19,16 +19,19 @@ from app.services.llm.errors import (
     LLMAuthError,
     LLMConfigError,
     LLMError,
+    LLMExternalConsentError,
     LLMModelNotFoundError,
     LLMNotAvailableError,
     LLMRateLimitError,
     LLMResponseError,
+    LLMSecretKeyError,
     LLMUnavailableError,
 )
 from app.services.llm.factory import create_llm
 from app.services.llm.registry import LLMRegistry, ModelChoice, ProviderCatalog
 from app.services.llm.settings import LLMSettings, ProviderSettings, load_settings
 from app.services.llm.validator import ModelCheck, ModelValidator
+from app.services.llm.user_config import effective_registry, registry_for_candidate
 
 
 @lru_cache(maxsize=1)
@@ -43,6 +46,7 @@ __all__ = [
     "LLMAuthError",
     "LLMConfigError",
     "LLMError",
+    "LLMExternalConsentError",
     "LLMHealth",
     "LLMModelNotFoundError",
     "LLMNotAvailableError",
@@ -50,6 +54,7 @@ __all__ = [
     "LLMRateLimitError",
     "LLMRegistry",
     "LLMResponseError",
+    "LLMSecretKeyError",
     "LLMSettings",
     "LLMUnavailableError",
     "ModelCheck",
@@ -59,6 +64,8 @@ __all__ = [
     "ProviderCatalog",
     "ProviderSettings",
     "create_llm",
+    "effective_registry",
     "get_registry",
     "load_settings",
+    "registry_for_candidate",
 ]

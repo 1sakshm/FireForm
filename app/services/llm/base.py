@@ -18,6 +18,7 @@ class ModelInfo:
     quantization: str | None = None
     loaded: bool | None = None
     installed: bool | None = None
+    manual: bool | None = None
 
 
 @dataclass(frozen=True)

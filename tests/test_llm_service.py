@@ -5,6 +5,10 @@ OpenAI compatible class at its SDK client. The registry and validator have
 their own file, test_llm_registry.py.
 """
 
+import os
+import stat
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,10 +16,12 @@ import httpx
 import openai
 import pytest
 import requests
+from cryptography.fernet import Fernet
 
 from app.services.llm import (
     LLMAuthError,
     LLMConfigError,
+    LLMSecretKeyError,
     LLMModelNotFoundError,
     LLMProvider,
     LLMRateLimitError,
@@ -763,6 +769,119 @@ class TestOllamaPull:
         parsed = [json.loads(line) for line in lines]
         assert [event for event in parsed if event.get("status") == "success"] == [{"status": "success"}]
         assert events == ["callback", "success"]
+
+
+# ---------------------------------------------------------------------------
+# load_settings: Ollama pull_timeout and installable_models
+# ---------------------------------------------------------------------------
+
+class TestLLMSecretKey:
+
+    def _configure_file(self, monkeypatch, path):
+        from app.core import config
+
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", "")
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", path)
+
+    def test_api_generates_key_file_on_first_credential_save(self, tmp_path, monkeypatch):
+        from app.services.llm.user_config import decrypt_api_key, encrypt_api_key
+
+        key_file = tmp_path / "secrets" / "llm_secret.key"
+        self._configure_file(monkeypatch, key_file)
+
+        assert not key_file.exists()
+        encrypted = encrypt_api_key("provider-secret")
+
+        assert key_file.is_file()
+        assert decrypt_api_key(encrypted, "openai") == "provider-secret"
+        if os.name == "posix":
+            assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+
+    def test_key_file_is_reused_by_a_separate_process(self, tmp_path, monkeypatch):
+        from app.services.llm.user_config import encrypt_api_key
+
+        key_file = tmp_path / "secrets" / "llm_secret.key"
+        self._configure_file(monkeypatch, key_file)
+        encrypted = encrypt_api_key("provider-secret")
+
+        env = os.environ.copy()
+        env["LLM_SECRET_KEY"] = ""
+        env["LLM_SECRET_KEY_FILE"] = str(key_file)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from app.services.llm.user_config import decrypt_api_key; "
+                f"print(decrypt_api_key({encrypted!r}, 'openai') or '')",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.stdout.strip() == "provider-secret"
+
+    def test_environment_key_overrides_file_and_does_not_create_it(self, tmp_path, monkeypatch):
+        from app.core import config
+        from app.services.llm.user_config import decrypt_api_key, encrypt_api_key
+
+        key_file = tmp_path / "missing.key"
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", Fernet.generate_key().decode("ascii"))
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", key_file)
+
+        encrypted = encrypt_api_key("provider-secret")
+
+        assert decrypt_api_key(encrypted, "openai") == "provider-secret"
+        assert not key_file.exists()
+
+    def test_missing_file_is_warning_for_reader_and_not_created(self, tmp_path, monkeypatch, caplog):
+        from app.services.llm.user_config import decrypt_api_key
+
+        key_file = tmp_path / "missing.key"
+        self._configure_file(monkeypatch, key_file)
+
+        assert decrypt_api_key("not-a-valid-token", "openai") is None
+        assert not key_file.exists()
+        assert "cannot be decrypted" in caplog.text
+
+    def test_corrupt_file_is_warning_for_reader_and_cannot_be_overwritten(self, tmp_path, monkeypatch, caplog):
+        from app.services.llm.user_config import decrypt_api_key, encrypt_api_key
+
+        key_file = tmp_path / "corrupt.key"
+        key_file.write_text("not-a-fernet-key", encoding="ascii")
+        self._configure_file(monkeypatch, key_file)
+
+        assert decrypt_api_key("not-a-valid-token", "openai") is None
+        assert "cannot be decrypted" in caplog.text
+        with pytest.raises(LLMSecretKeyError, match="master key is unavailable"):
+            encrypt_api_key("provider-secret")
+        assert key_file.read_text(encoding="ascii") == "not-a-fernet-key"
+
+    def test_unreadable_default_credential_falls_back_to_ollama(self, tmp_path, monkeypatch, caplog):
+        from copy import deepcopy
+
+        from app.api.schemas.enums import LLMProvider
+        from app.core import config
+        from app.models import LLMProviderCredential
+        from app.services.llm.user_config import _build_registry
+
+        self._configure_file(monkeypatch, tmp_path / "missing.key")
+        monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
+        monkeypatch.setattr(config, "LLM_MODEL", "")
+        provider_env = deepcopy(config.LLM_PROVIDER_ENV)
+        provider_env["openai"]["MODELS"] = ""
+        provider_env["openai"]["API_KEY"] = ""
+        monkeypatch.setattr(config, "LLM_PROVIDER_ENV", provider_env)
+
+        registry = _build_registry(
+            {"openai": LLMProviderCredential(provider="openai", api_key_encrypted="saved-ciphertext")},
+            [],
+            False,
+        )
+
+        assert registry.default.provider is LLMProvider.ollama
+        assert "cannot be decrypted" in caplog.text
 
 
 # ---------------------------------------------------------------------------

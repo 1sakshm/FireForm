@@ -1,5 +1,6 @@
 import re
-from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from app.api.schemas.enums import HealthState, LLMProvider
 
@@ -27,6 +28,7 @@ class ModelInfo(BaseModel):
     quantization: str | None = None
     loaded: bool | None = None
     installed: bool | None = None
+    manual: bool | None = None
 
 
 class DownloadableModel(BaseModel):
@@ -113,6 +115,67 @@ class LLMTestResult(BaseModel):
     model: str
     ok: bool
     latency_ms: int | None = None
+    detail: str | None = None
+    error_code: str | None = None
+
+
+class LLMProviderCredentialRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr | None = None
+    base_url: str | None = None
+    structured_output: bool | None = None
+
+
+class LLMProviderCredentialStatus(BaseModel):
+    provider: LLMProvider
+    configured: bool
+    source: Literal["env", "ui", "none"]
+    key_hint: str | None = None
+    enabled: bool
+    external: bool
+    base_url: str | None = None
+    structured_output: bool | None = None
+
+
+class LLMProviderCredentialList(BaseModel):
+    providers: list[LLMProviderCredentialStatus]
+
+
+class LLMExternalConsent(BaseModel):
+    allow_external: bool
+    source: Literal["env", "ui", "none"]
+
+
+class LLMExternalConsentRequest(BaseModel):
+    allow_external: bool
+
+
+class LLMProviderValidationRequest(LLMProviderCredentialRequest):
+    pass
+
+
+class LLMProviderValidationResult(BaseModel):
+    provider: LLMProvider
+    ok: bool
+    models: list[ModelInfo] = Field(default_factory=list)
+    detail: str | None = None
+    error_code: str | None = None
+
+
+class LLMManualModelRequest(BaseModel):
+    model: str
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model_name(cls, value: str) -> str:
+        return validate_model_name(value)
+
+
+class LLMManualModelResult(BaseModel):
+    provider: LLMProvider
+    model: str
+    ok: bool
     detail: str | None = None
     error_code: str | None = None
 

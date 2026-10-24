@@ -117,7 +117,8 @@ class OpenAICompatibleLLM(LLM):
             raise self._auth_error(exc) from exc
         except openai.RateLimitError as exc:
             raise LLMRateLimitError(
-                f"{name} is still rate limiting after retries, or the account is out of quota: {_reason(exc)}"
+                f"{name} is still rate limiting after retries, or the account is out of quota: "
+                f"{_reason(exc, self.client.api_key)}"
             ) from exc
         except openai.APITimeoutError as exc:
             raise LLMUnavailableError(f"{name} at {self.base_url} timed out") from exc
@@ -126,7 +127,7 @@ class OpenAICompatibleLLM(LLM):
                 f"Could not reach {name} at {self.base_url}. Check {spec.setting('BASE_URL')} and the network."
             ) from exc
         except openai.APIStatusError as exc:
-            reason = _reason(exc)
+            reason = _reason(exc, self.client.api_key)
             # Gemini answers a bad key with 400 instead of 401
             if exc.status_code == 400 and "api key" in reason.lower():
                 raise self._auth_error(exc) from exc
@@ -142,12 +143,12 @@ class OpenAICompatibleLLM(LLM):
 
     def _auth_error(self, exc: openai.APIStatusError) -> LLMAuthError:
         return LLMAuthError(
-            f"{self.provider.value} rejected the API key: {_reason(exc)}. "
+            f"{self.provider.value} rejected the API key: {_reason(exc, self.client.api_key)}. "
             f"Check {SPECS[self.provider].setting('API_KEY')}."
         )
 
 
-def _reason(exc: openai.APIStatusError) -> str:
+def _reason(exc: openai.APIStatusError, secret: str = "") -> str:
     """The provider's own error message, without the JSON around it.
 
     Bodies differ: OpenAI sends {"error": {"message"}}, Gemini a list of those,
@@ -159,7 +160,10 @@ def _reason(exc: openai.APIStatusError) -> str:
     if isinstance(body, dict):
         error = body.get("error", body)
         if isinstance(error, dict) and error.get("message"):
-            return str(error["message"]).rstrip(".")
+            message = str(error["message"]).rstrip(".")
+            return message.replace(secret, "[redacted]") if secret else message
         if isinstance(error, str):
-            return error.rstrip(".")
-    return exc.message.rstrip(".")
+            message = error.rstrip(".")
+            return message.replace(secret, "[redacted]") if secret else message
+    message = exc.message.rstrip(".")
+    return message.replace(secret, "[redacted]") if secret else message

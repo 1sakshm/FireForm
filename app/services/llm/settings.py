@@ -25,7 +25,7 @@ class ProviderSettings:
     base_url: str
     models: ModelSelection
     default_model: str | None
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     timeout: int = 300
     pull_timeout: int = 120
     installable_models: tuple[str, ...] = ()
@@ -33,6 +33,7 @@ class ProviderSettings:
     temperature: float | None = None
     structured_output: bool = True
     max_tokens: int | None = None
+    manual_models: tuple[str, ...] = ()
 
     @property
     def provider(self) -> LLMProvider:
@@ -199,12 +200,19 @@ def is_local_url(url: str) -> bool:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return host == "localhost" or "." not in host or host.endswith((".local", ".internal", ".lan"))
+        return (
+            host in {"localhost", "host.docker.internal"}
+            or "." not in host
+            or host.endswith((".local", ".internal", ".lan"))
+        )
     return ip.is_loopback or ip.is_private
 
 
 def _check_url(name: str, url: str) -> str:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        raise LLMConfigError(f"{name} is not a valid URL. It should look like http://host:port.") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise LLMConfigError(f"{name}={url!r} is not a valid URL. It should look like http://host:port.")
     return url

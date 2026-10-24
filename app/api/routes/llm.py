@@ -4,8 +4,11 @@ Contract: contracts/path/system.yaml + contracts/schemas/system.yaml
 """
 
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi.responses import StreamingResponse
+from sqlmodel import Session
 
+from app.api.deps import get_db
 from app.api.schemas.enums import LLMProvider
 from app.api.schemas.system import (
     DownloadableModel,
@@ -32,8 +35,8 @@ router = APIRouter(prefix="/system/llm", tags=["system"])
     response_model_exclude_none=True,
     summary="List the LLM providers and models that can fill forms",
 )
-def list_llm_models(refresh: bool = False):
-    registry = llm.get_registry()
+def list_llm_models(refresh: bool = False, db: Session = Depends(get_db)):
+    registry = llm.effective_registry(db)
     providers: list[LLMProviderModels] = []
     for c in registry.catalog(refresh):
         downloadable = (
@@ -64,9 +67,9 @@ def list_llm_models(refresh: bool = False):
     response_model_exclude_none=True,
     summary="Check that a model actually answers",
 )
-def test_llm_model(body: LLMTestRequest | None = None):
+def test_llm_model(body: LLMTestRequest | None = None, db: Session = Depends(get_db)):
     body = body or LLMTestRequest()
-    check = llm.ModelValidator(llm.get_registry()).probe(body.provider, body.model)
+    check = llm.ModelValidator(llm.effective_registry(db)).probe(body.provider, body.model)
     return LLMTestResult.model_validate(check)
 
 
@@ -80,8 +83,8 @@ def test_llm_model(body: LLMTestRequest | None = None):
     },
     summary="Pull an AI model from Ollama",
 )
-def pull_llm_model(req: LLMPullRequest):
-    registry = llm.get_registry()
+def pull_llm_model(req: LLMPullRequest, db: Session = Depends(get_db)):
+    registry = llm.effective_registry(db)
     provider_val = req.provider or "ollama"
     registry.validate_pull(provider_val, req.model)
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from app.api.schemas.enums import LLMProvider
 from app.services.llm.base import DownloadableModelInfo, LLM, ModelInfo
-from app.services.llm.errors import LLMError, LLMNotAvailableError
+from app.services.llm.errors import LLMError, LLMNotAvailableError, LLMResponseError
 from app.services.llm.factory import create_llm
 from app.services.llm.settings import LLMSettings, ProviderSettings
 from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS
@@ -157,15 +157,27 @@ class LLMRegistry:
         try:
             offered = self._clients[settings.provider].list_models()
         except LLMError as exc:
-            return ProviderCatalog(
-                settings.provider,
-                available=False,
-                models=(),
-                default_model=settings.default_model,
-                detail=exc.message,
-                error_code=exc.error_code,
-                error=exc,
-            )
+            if (
+                settings.manual_models
+                and isinstance(exc, LLMResponseError)
+                and "has no model list" in exc.message
+            ):
+                offered = []
+            else:
+                return ProviderCatalog(
+                    settings.provider,
+                    available=False,
+                    models=(),
+                    default_model=settings.default_model,
+                    detail=exc.message,
+                    error_code=exc.error_code,
+                    error=exc,
+                )
+        if settings.manual_models:
+            offered_by_name = {model.name: model for model in offered}
+            for name in settings.manual_models:
+                offered_by_name.setdefault(name, ModelInfo(name=name, manual=True))
+            offered = list(offered_by_name.values())
         kept, missing = settings.models.pick(offered)
         offered_names = {m.name for m in offered}
 

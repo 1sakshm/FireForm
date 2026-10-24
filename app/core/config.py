@@ -98,6 +98,13 @@ API_PREFIX = "/api/v1"
 
 # --- Security & Access Control ---------------------------------------------
 FIREFORM_API_KEY = os.getenv("FIREFORM_API_KEY", "")
+LLM_SECRET_KEY = os.getenv("LLM_SECRET_KEY", "").strip()
+_DEFAULT_LLM_SECRET_KEY_FILE = (
+    Path("/data/secrets/llm_secret.key")
+    if Path("/data/secrets").is_dir()
+    else BASE_DIR / "data" / "secrets" / "llm_secret.key"
+)
+LLM_SECRET_KEY_FILE = Path(os.getenv("LLM_SECRET_KEY_FILE", str(_DEFAULT_LLM_SECRET_KEY_FILE))).expanduser()
 
 # --- Data Retention --------------------------------------------------------
 RETENTION_PERIOD_DAYS = int(os.getenv("RETENTION_PERIOD_DAYS", "30"))
