@@ -636,6 +636,60 @@ class TestWeatherEndpoints:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Address lookup endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestZipcodeEndpoints:
+
+    LOOKUP_URL = f"{API_PREFIX}/zipcode/lookup-address"
+    GEOCODE = "app.services.external_apis.zipcode_api._GEOLOCATOR.geocode"
+
+    @pytest.mark.parametrize("address", ["", "   "])
+    def test_lookup_blank_address_rejected(self, client, monkeypatch, address):
+        def fake_geocode(*args, **kwargs):
+            raise AssertionError("Nominatim should not be called for a blank address")
+
+        monkeypatch.setattr(self.GEOCODE, fake_geocode)
+
+        resp = client.get(self.LOOKUP_URL, params={"address": address})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["validation_errors"][0]["field"] == "query.address"
+
+    def test_lookup_upstream_error_is_502(self, client, monkeypatch):
+        from geopy.exc import GeocoderServiceError
+
+        def fake_geocode(*args, **kwargs):
+            raise GeocoderServiceError("HTTP Error 503: Service Unavailable")
+
+        monkeypatch.setattr(self.GEOCODE, fake_geocode)
+
+        resp = client.get(self.LOOKUP_URL, params={"address": "Paris"})
+        assert resp.status_code == 502
+        assert resp.json()["error_code"] == "GEOCODING_FAILED"
+
+    def test_lookup_timeout_is_504(self, client, monkeypatch):
+        from geopy.exc import GeocoderTimedOut
+
+        def fake_geocode(*args, **kwargs):
+            raise GeocoderTimedOut("timed out")
+
+        monkeypatch.setattr(self.GEOCODE, fake_geocode)
+
+        resp = client.get(self.LOOKUP_URL, params={"address": "Paris"})
+        assert resp.status_code == 504
+        assert resp.json()["error_code"] == "GEOCODING_TIMEOUT"
+
+    def test_lookup_no_results(self, client, monkeypatch):
+        monkeypatch.setattr(self.GEOCODE, lambda *args, **kwargs: None)
+
+        resp = client.get(self.LOOKUP_URL, params={"address": "Nowhere at all"})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # End-to-end pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
