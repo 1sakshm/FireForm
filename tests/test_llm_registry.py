@@ -10,7 +10,7 @@ from sqlmodel import select
 
 from app.api.schemas.enums import InputStatus, InputType
 from app.core.config import API_PREFIX
-from app.models import Input
+from app.models import Input, LLMManualModel, LLMProviderCredential, LLMRuntimeConfig
 from app.services.llm import (
     LLM,
     LLMAuthError,
@@ -189,6 +189,29 @@ class TestResolve:
         with pytest.raises(LLMNotAvailableError):
             registry.resolve(GEMINI, "g9")
         assert gemini.list_calls == 0
+
+    def test_manual_model_is_allowed_offered_and_resolvable(self):
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            GEMINI: ProviderSettings(
+                spec=SPECS[GEMINI],
+                base_url="http://local:1",
+                models=ModelSelection.parse("g1,manual-model"),
+                default_model="g1",
+                manual_models=("manual-model",),
+            ),
+        }
+        gemini = FakeLLM(GEMINI, ["g1"])
+        registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), GEMINI: gemini},
+            settings=settings,
+        )
+
+        catalog = registry.provider_catalog(GEMINI)
+        assert settings[GEMINI].models.allows("manual-model")
+        assert catalog.offers("manual-model")
+        assert next(model for model in catalog.models if model.name == "manual-model").manual is True
+        assert registry.resolve(GEMINI, "manual-model") == ModelChoice(GEMINI, "manual-model")
 
     def test_unreachable_provider_is_503(self, ollama):
         registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
@@ -397,6 +420,274 @@ def ollama_offers(test_llm, monkeypatch):
 
 class TestLLMEndpoints:
 
+    def test_save_status_and_delete_credential_never_return_key(self, client, db, monkeypatch, tmp_path):
+        from cryptography.fernet import Fernet
+
+        from app.core import config
+        from app.services.llm import user_config
+
+        secret = "custom-provider-secret-value"
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", Fernet.generate_key().decode("ascii"))
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", tmp_path / "unused.key")
+        db.add(LLMRuntimeConfig(id=1, allow_external=True))
+        db.commit()
+        user_config.invalidate_registry_cache()
+        try:
+            saved = client.put(
+                f"{API_PREFIX}/system/llm/providers/config/custom",
+                json={"api_key": secret, "base_url": "http://vllm:8000/v1"},
+            )
+            assert saved.status_code == 200
+            assert secret not in saved.text
+            assert saved.json()["source"] == "ui"
+
+            status = client.get(f"{API_PREFIX}/system/llm/providers/config")
+            assert status.status_code == 200
+            assert secret not in status.text
+
+            deleted = client.delete(f"{API_PREFIX}/system/llm/providers/config/custom")
+            assert deleted.status_code == 200
+            assert db.exec(select(LLMProviderCredential)).all() == []
+            assert db.exec(select(LLMManualModel)).all() == []
+        finally:
+            user_config.invalidate_registry_cache()
+
+    def test_validate_provider_candidate_does_not_save_configuration(self, client, db, monkeypatch):
+        from app.api.routes import llm_config
+
+        custom = LLMProvider.custom
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            custom: ProviderSettings(
+                spec=SPECS[custom],
+                base_url="http://vllm:8000/v1",
+                models=ModelSelection.parse("model-a"),
+                default_model="model-a",
+            ),
+        }
+        candidate = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), custom: FakeLLM(custom, ["model-a"])},
+            settings=settings,
+        )
+        monkeypatch.setattr(llm_config, "registry_for_candidate", lambda *_args, **_kwargs: candidate)
+
+        response = client.post(
+            f"{API_PREFIX}/system/llm/providers/config/custom/validate",
+            json={"base_url": "http://vllm:8000/v1"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert [model["name"] for model in response.json()["models"]] == ["model-a"]
+        assert db.exec(select(LLMProviderCredential)).all() == []
+
+    def test_validation_error_redacts_candidate_key(self, client, db, monkeypatch, caplog):
+        from app.api.routes import llm_config
+
+        secret = "validation-secret-value"
+        error_registry = _registry(
+            {
+                OLLAMA: FakeLLM(OLLAMA, ["qwen"]),
+                LLMProvider.custom: FakeLLM(
+                    LLMProvider.custom,
+                    list_error=LLMAuthError(f"custom rejected key {secret}"),
+                ),
+            },
+            settings={
+                OLLAMA: _provider(OLLAMA, "*", "qwen"),
+                LLMProvider.custom: ProviderSettings(
+                    spec=SPECS[LLMProvider.custom],
+                    base_url="http://vllm:8000/v1",
+                    models=ModelSelection.parse("*"),
+                    default_model=None,
+                ),
+            },
+        )
+        monkeypatch.setattr(llm_config, "registry_for_candidate", lambda *_args, **_kwargs: error_registry)
+
+        response = client.post(
+            f"{API_PREFIX}/system/llm/providers/config/custom/validate",
+            json={"api_key": secret, "base_url": "http://vllm:8000/v1"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is False
+        assert secret not in response.text
+        assert "[redacted]" in response.json()["detail"]
+        assert secret not in caplog.text
+        assert db.exec(select(LLMProviderCredential)).all() == []
+
+    def test_custom_local_url_needs_no_consent_but_remote_does(self, client, db):
+        local = client.put(
+            f"{API_PREFIX}/system/llm/providers/config/custom",
+            json={"base_url": "http://host.docker.internal:8000/v1"},
+        )
+        assert local.status_code == 200
+
+        blocked = client.put(
+            f"{API_PREFIX}/system/llm/providers/config/custom",
+            json={"base_url": "https://llm.example/v1"},
+        )
+        assert blocked.status_code == 422
+        assert blocked.json()["error_code"] == "LLM_EXTERNAL_CONSENT_REQUIRED"
+
+        consent = client.put(
+            f"{API_PREFIX}/system/llm/external-consent",
+            json={"allow_external": True},
+        )
+        assert consent.status_code == 200
+        assert consent.json()["allow_external"] is True
+
+        allowed = client.put(
+            f"{API_PREFIX}/system/llm/providers/config/custom",
+            json={"base_url": "https://llm.example/v1"},
+        )
+        assert allowed.status_code == 200
+
+    def test_external_consent_422_does_not_echo_candidate_key(self, client, db, caplog):
+        secret = "candidate-secret-never-echo"
+
+        response = client.put(
+            f"{API_PREFIX}/system/llm/providers/config/openai",
+            json={"api_key": secret},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error_code"] == "LLM_EXTERNAL_CONSENT_REQUIRED"
+        assert secret not in response.text
+        assert secret not in caplog.text
+        assert db.exec(select(LLMProviderCredential)).all() == []
+
+    def test_secret_key_unavailable_is_503_without_echoing_key(self, client, db, monkeypatch, tmp_path, caplog):
+        from app.core import config
+        from app.services.llm import user_config
+
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("x", encoding="ascii")
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", "")
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", blocker / "key")
+        secret = "candidate-secret-not-echoed"
+        user_config.invalidate_registry_cache()
+        try:
+            response = client.put(
+                f"{API_PREFIX}/system/llm/providers/config/custom",
+                json={"api_key": secret, "base_url": "http://vllm:8000/v1"},
+            )
+
+            assert response.status_code == 503
+            assert response.json()["error_code"] == "LLM_SECRET_KEY_UNAVAILABLE"
+            assert secret not in response.text
+            assert secret not in caplog.text
+            assert db.exec(select(LLMProviderCredential)).all() == []
+        finally:
+            user_config.invalidate_registry_cache()
+
+    def test_credential_status_reports_unreadable_saved_key(self, client, db, monkeypatch, test_registry, tmp_path):
+        from app.core import config
+        from app.services.llm import user_config
+
+        encrypted = "saved-ciphertext-never-returned"
+        db.add(LLMProviderCredential(provider="openai", api_key_encrypted=encrypted))
+        db.commit()
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", "")
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", tmp_path / "missing.key")
+        user_config._invalid_credentials.clear()
+        user_config._warned_credential_errors.clear()
+        assert user_config.decrypt_api_key(encrypted, "openai") is None
+        monkeypatch.setattr(user_config, "_build_registry", lambda *_args, **_kwargs: test_registry)
+        user_config.invalidate_registry_cache()
+        try:
+            response = client.get(f"{API_PREFIX}/system/llm/providers/config")
+
+            assert response.status_code == 200
+            openai_status = next(
+                item for item in response.json()["providers"] if item["provider"] == "openai"
+            )
+            assert openai_status["credential_status"] == "unavailable"
+            assert encrypted not in response.text
+        finally:
+            user_config.invalidate_registry_cache()
+
+    def test_models_endpoint_marks_manual_model(self, client, db, monkeypatch):
+        db.add(LLMManualModel(provider="gemini", model="manual-model"))
+        db.commit()
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            GEMINI: ProviderSettings(
+                spec=SPECS[GEMINI],
+                base_url="http://local:1",
+                models=ModelSelection.parse("g1,manual-model"),
+                default_model="g1",
+                manual_models=("manual-model",),
+            ),
+        }
+        manual_registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), GEMINI: FakeLLM(GEMINI, ["g1"])},
+            settings=settings,
+        )
+        monkeypatch.setattr("app.services.llm.effective_registry", lambda _db: manual_registry)
+
+        response = client.get(f"{API_PREFIX}/system/llm/models")
+
+        assert response.status_code == 200
+        model = next(
+            item
+            for provider in response.json()["providers"]
+            if provider["provider"] == "gemini"
+            for item in provider["models"]
+            if item["name"] == "manual-model"
+        )
+        assert model["manual"] is True
+
+    def test_manual_model_endpoint_validates_persists_and_lists_model(self, client, db, monkeypatch):
+        from app.api.routes import llm_config
+
+        db.add(LLMProviderCredential(provider="custom", base_url="http://vllm:8000/v1"))
+        db.commit()
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            LLMProvider.custom: ProviderSettings(
+                spec=SPECS[LLMProvider.custom],
+                base_url="http://vllm:8000/v1",
+                models=ModelSelection.parse("manual-model"),
+                default_model=None,
+                manual_models=("manual-model",),
+            ),
+        }
+        manual_registry = _registry(
+            {
+                OLLAMA: FakeLLM(OLLAMA, ["qwen"]),
+                LLMProvider.custom: FakeLLM(LLMProvider.custom, []),
+            },
+            settings=settings,
+        )
+        monkeypatch.setattr(llm_config, "registry_for_candidate", lambda *_args, **_kwargs: manual_registry)
+        monkeypatch.setattr("app.services.llm.effective_registry", lambda _db: manual_registry)
+
+        response = client.post(
+            f"{API_PREFIX}/system/llm/providers/config/custom/models",
+            json={"model": "manual-model"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert [model.model for model in db.exec(select(LLMManualModel)).all()] == ["manual-model"]
+
+        catalog = client.get(f"{API_PREFIX}/system/llm/models").json()["providers"]
+        custom = next(provider for provider in catalog if provider["provider"] == "custom")
+        assert {"name": "manual-model", "manual": True} in custom["models"]
+
+    def test_deleting_provider_config_also_deletes_manual_models(self, client, db):
+        db.add(LLMProviderCredential(provider="gemini", key_hint="hint"))
+        db.add(LLMManualModel(provider="gemini", model="manual-model"))
+        db.commit()
+
+        response = client.delete(f"{API_PREFIX}/system/llm/providers/config/gemini")
+
+        assert response.status_code == 200
+        assert db.exec(select(LLMProviderCredential)).all() == []
+        assert db.exec(select(LLMManualModel)).all() == []
+
     def test_list_models(self, client, ollama_offers):
         # ollama_offers uses ModelInfo(name=n) without extra fields; FastAPI omits
         # null fields, so models appear as {"name": "..."}.
@@ -582,7 +873,7 @@ class TestPullEndpoint:
         resp = client.post(self._PULL, json={"model": "qwen2.5:3b"})
         assert resp.status_code == 200
         assert "application/x-ndjson" in resp.headers["content-type"]
-        lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line.strip()]
         assert lines[-1]["status"] == "success"
         assert events == ["success-line-consumed", "catalog-refreshed"]
 
@@ -624,6 +915,6 @@ class TestPullEndpoint:
         monkeypatch.setattr(test_llm, "pull_model", pull)
         resp = client.post(self._PULL, json={"model": "qwen2.5:3b"})
         assert resp.status_code == 200
-        lines = [json.loads(l) for l in resp.text.strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line.strip()]
         assert any("error" in p for p in lines)
         assert not any(p.get("status") == "success" for p in lines)

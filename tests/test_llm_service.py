@@ -90,6 +90,14 @@ class TestLoadSettings:
         assert llm.host == "http://ollama:11434"
         assert llm.model == "qwen2.5:1.5b"
 
+    def test_provider_settings_repr_never_includes_api_key(self):
+        secret = "provider-secret-value"
+        settings = load_settings(
+            _only("gemini", {"API_KEY": secret, "MODELS": "g"}, LLM_ALLOW_EXTERNAL="true")
+        )
+
+        assert secret not in repr(settings.providers[LLMProvider.gemini])
+
     def test_llm_model_and_timeout_override(self):
         settings = load_settings(_cfg(LLM_MODEL="llama3:8b", LLM_TIMEOUT="60"))
         assert settings.default_model == "llama3:8b"
@@ -494,6 +502,35 @@ class TestOpenAICompatibleLLM:
         assert info.value.message == "gemini rejected the API key: Please pass a valid API key. Check GEMINI_API_KEY."
         assert info.value.error_code == "LLM_AUTH_FAILED"
 
+    def test_api_key_in_provider_error_is_redacted(self):
+        secret = "sk-example-secret-value"
+        llm = OpenAICompatibleLLM(LLMProvider.openai, "https://api.example/v1", secret, "gpt", 60)
+        llm.client = MagicMock()
+        llm.client.chat.completions.create.side_effect = _status_error(
+            openai.AuthenticationError, 401, {"error": {"message": f"Invalid key {secret}"}}
+        )
+        with pytest.raises(LLMAuthError) as info:
+            llm.generate_json("prompt", SCHEMA)
+        assert secret not in info.value.message
+        assert "[redacted]" in info.value.message
+
+    def test_non_string_error_redaction_key_is_ignored(self):
+        from app.services.llm.openai_compatible import _reason
+
+        error = _status_error(openai.BadRequestError, 400, {"error": {"message": "Bad request"}})
+        assert _reason(error, MagicMock()) == "Bad request"
+
+    @pytest.mark.parametrize("secret", ["short", "not-needed"])
+    def test_short_and_placeholder_keys_are_not_used_for_redaction(self, secret):
+        from app.services.llm.openai_compatible import _reason
+
+        error = _status_error(
+            openai.BadRequestError,
+            400,
+            {"error": {"message": f"Request mentioned {secret}"}},
+        )
+        assert _reason(error, secret) == f"Request mentioned {secret}"
+
     def test_missing_model_names_it(self):
         llm = _openai_llm()
         body = {"error": {"message": "The model `nope` does not exist"}}
@@ -599,7 +636,7 @@ class TestOllamaPull:
         fired = []
         lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
 
-        parsed = [json.loads(l) for l in lines]
+        parsed = [json.loads(line) for line in lines]
         assert parsed[0]["status"] == "pulling manifest"
         assert parsed[-1]["status"] == "success"
         assert fired == [1]
@@ -619,7 +656,7 @@ class TestOllamaPull:
         fired = []
         lines = list(_pull_llm().pull_model("secret:model", on_success=lambda: fired.append(1)))
 
-        parsed = [json.loads(l) for l in lines]
+        parsed = [json.loads(line) for line in lines]
         statuses = [p.get("status") for p in parsed]
         assert "success" not in statuses
         assert fired == []
@@ -635,8 +672,8 @@ class TestOllamaPull:
         fired = []
         lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
 
-        assert any("error" in json.loads(l) for l in lines)
-        assert not any(json.loads(l).get("status") == "success" for l in lines)
+        assert any("error" in json.loads(line) for line in lines)
+        assert not any(json.loads(line).get("status") == "success" for line in lines)
         assert fired == []
 
     @pytest.mark.parametrize("exc", [
@@ -654,10 +691,10 @@ class TestOllamaPull:
         fired = []
         lines = list(_pull_llm().pull_model("qwen2.5:3b", on_success=lambda: fired.append(1)))
 
-        errors = [json.loads(l) for l in lines if "error" in json.loads(l)]
+        errors = [json.loads(line) for line in lines if "error" in json.loads(line)]
         assert errors
         assert errors[0]["error"]
-        assert not any(json.loads(l).get("status") == "success" for l in lines)
+        assert not any(json.loads(line).get("status") == "success" for line in lines)
         assert fired == []
 
     def test_ollama_down_before_stream_raises_unavailable(self, monkeypatch):
@@ -703,7 +740,7 @@ class TestOllamaPull:
         monkeypatch.setattr("app.services.llm.ollama.requests.post", lambda *a, **k: resp)
 
         lines = list(_pull_llm().pull_model("qwen2.5:3b"))
-        parsed = [json.loads(l) for l in lines]
+        parsed = [json.loads(line) for line in lines]
         statuses = [p["status"] for p in parsed]
         assert "pulling manifest" in statuses
         assert "success" in statuses
@@ -723,8 +760,8 @@ class TestOllamaPull:
 
         lines = list(_pull_llm().pull_model("qwen2.5:3b"))
         # No empty lines yielded
-        assert all(l.strip() for l in lines)
-        parsed = [json.loads(l) for l in lines]
+        assert all(line.strip() for line in lines)
+        parsed = [json.loads(line) for line in lines]
         assert parsed[-1]["status"] == "success"
 
     def test_no_success_event_returns_error_without_callback(self, monkeypatch):
@@ -779,9 +816,12 @@ class TestLLMSecretKey:
 
     def _configure_file(self, monkeypatch, path):
         from app.core import config
+        from app.services.llm import user_config
 
         monkeypatch.setattr(config, "LLM_SECRET_KEY", "")
         monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", path)
+        user_config._invalid_credentials.clear()
+        user_config._warned_credential_errors.clear()
 
     def test_api_generates_key_file_on_first_credential_save(self, tmp_path, monkeypatch):
         from app.services.llm.user_config import decrypt_api_key, encrypt_api_key
@@ -822,18 +862,76 @@ class TestLLMSecretKey:
 
         assert result.stdout.strip() == "provider-secret"
 
-    def test_environment_key_overrides_file_and_does_not_create_it(self, tmp_path, monkeypatch):
+    def test_worker_process_sees_provider_credential_saved_in_database(self, tmp_path, monkeypatch):
+        from sqlmodel import Session, SQLModel, create_engine
+
+        from app.core import config
+        from app.models import LLMProviderCredential
+        from app.services.llm.user_config import encrypt_api_key
+
+        database_path = tmp_path / "worker-state.sqlite"
+        database_url = f"sqlite:///{database_path.as_posix()}"
+        engine = create_engine(database_url)
+        SQLModel.metadata.create_all(engine)
+        secret_key = Fernet.generate_key().decode("ascii")
+        monkeypatch.setattr(config, "LLM_SECRET_KEY", secret_key)
+        monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", tmp_path / "unused.key")
+        encrypted = encrypt_api_key("worker-provider-secret")
+        with Session(engine) as session:
+            session.add(
+                LLMProviderCredential(
+                    provider="openai",
+                    api_key_encrypted=encrypted,
+                    key_hint="cret",
+                )
+            )
+            session.commit()
+
+        env = os.environ.copy()
+        env.update({
+            "DATABASE_URL": database_url,
+            "LLM_SECRET_KEY": secret_key,
+            "LLM_PROVIDER": "ollama",
+            "LLM_ALLOW_EXTERNAL": "true",
+            "OLLAMA_HOST": "http://localhost:11434",
+            "OLLAMA_MODELS": "*",
+            "OPENAI_MODELS": "",
+            "OPENAI_API_KEY": "",
+        })
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from sqlmodel import Session, create_engine; "
+                "from app.services.llm.user_config import effective_registry; "
+                "engine = create_engine(__import__('os').environ['DATABASE_URL']); "
+                "session = Session(engine); "
+                "print(','.join(p.value for p in effective_registry(session).providers)); "
+                "session.close()",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert "openai" in result.stdout.strip().split(",")
+        assert "worker-provider-secret" not in result.stdout + result.stderr
+
+    def test_environment_key_overrides_existing_key_file(self, tmp_path, monkeypatch):
         from app.core import config
         from app.services.llm.user_config import decrypt_api_key, encrypt_api_key
 
-        key_file = tmp_path / "missing.key"
+        key_file = tmp_path / "existing.key"
+        file_key = Fernet.generate_key()
+        key_file.write_bytes(file_key)
         monkeypatch.setattr(config, "LLM_SECRET_KEY", Fernet.generate_key().decode("ascii"))
         monkeypatch.setattr(config, "LLM_SECRET_KEY_FILE", key_file)
 
         encrypted = encrypt_api_key("provider-secret")
 
         assert decrypt_api_key(encrypted, "openai") == "provider-secret"
-        assert not key_file.exists()
+        assert key_file.read_bytes() == file_key
 
     def test_missing_file_is_warning_for_reader_and_not_created(self, tmp_path, monkeypatch, caplog):
         from app.services.llm.user_config import decrypt_api_key
@@ -864,7 +962,7 @@ class TestLLMSecretKey:
         from app.api.schemas.enums import LLMProvider
         from app.core import config
         from app.models import LLMProviderCredential
-        from app.services.llm.user_config import _build_registry
+        from app.services.llm.user_config import _build_registry, decrypt_api_key
 
         self._configure_file(monkeypatch, tmp_path / "missing.key")
         monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
@@ -881,7 +979,88 @@ class TestLLMSecretKey:
         )
 
         assert registry.default.provider is LLMProvider.ollama
-        assert "cannot be decrypted" in caplog.text
+        assert decrypt_api_key("saved-ciphertext", "openai") is None
+        assert sum("cannot be decrypted" in record.getMessage() for record in caplog.records) == 1
+
+    def test_environment_only_registry_remains_the_default(self, monkeypatch, test_registry):
+        from app.services.llm import user_config
+
+        class EmptySession:
+            reads = 0
+
+            def exec(self, _statement):
+                self.reads += 1
+                return SimpleNamespace(all=lambda: [])
+
+            def get(self, _model, _key):
+                return None
+
+        session = EmptySession()
+        monkeypatch.setattr(user_config.time, "monotonic", lambda: 100.0)
+        user_config.invalidate_registry_cache()
+        try:
+            assert user_config.effective_registry(session) is test_registry
+            assert user_config.effective_registry(session) is test_registry
+            assert session.reads == 2
+        finally:
+            user_config.invalidate_registry_cache()
+
+    def test_effective_registry_checks_database_only_every_few_seconds(self, monkeypatch, test_registry):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from app.services.llm import user_config
+
+        now = [100.0]
+        credential = SimpleNamespace(
+            provider="gemini",
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            key_hint=None,
+            base_url=None,
+            structured_output=None,
+            api_key_encrypted=None,
+        )
+
+        class FakeSession:
+            def __init__(self):
+                self.reads = 0
+
+            def exec(self, _statement):
+                records = [credential] if self.reads % 2 == 0 else []
+                self.reads += 1
+                return SimpleNamespace(all=lambda: records)
+
+            def get(self, _model, _key):
+                return None
+
+        session = FakeSession()
+        builds = []
+        monkeypatch.setattr(user_config.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            user_config,
+            "_build_registry",
+            lambda *_args, **_kwargs: builds.append(1) or test_registry,
+        )
+        user_config.invalidate_registry_cache()
+
+        try:
+            assert user_config.effective_registry(session) is test_registry
+            assert user_config.effective_registry(session) is test_registry
+            assert session.reads == 2
+            assert len(builds) == 1
+
+            now[0] += user_config._REGISTRY_CHECK_SECONDS + 0.1
+            user_config.effective_registry(session)
+            assert session.reads == 4
+            assert len(builds) == 1
+
+            credential.updated_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+            now[0] += user_config._REGISTRY_CHECK_SECONDS + 0.1
+            user_config.effective_registry(session)
+            assert session.reads == 6
+            assert len(builds) == 2
+        finally:
+            user_config.invalidate_registry_cache()
 
 
 # ---------------------------------------------------------------------------
