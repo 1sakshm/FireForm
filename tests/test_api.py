@@ -614,6 +614,29 @@ class TestWeatherEndpoints:
             "end_date": "2026-10-20",
         }
 
+    def test_forecast_upstream_error_is_502(self, client, monkeypatch):
+        from openmeteo_requests.Client import OpenMeteoRequestsError
+
+        def fake_weather_api(*args, **kwargs):
+            raise OpenMeteoRequestsError("failed to request 'https://api.open-meteo.com/v1/forecast': offline")
+
+        monkeypatch.setattr("openmeteo_requests.Client.weather_api", fake_weather_api)
+
+        resp = client.get(self.WEATHER_URL, params=self.VALID)
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["error_code"] == "WEATHER_FETCH_FAILED"
+        assert "offline" in body["message"]
+
+    def test_forecast_unexpected_error_is_500(self, client, monkeypatch):
+        def fake_get_weather(*args, **kwargs):
+            raise ValueError("boom")
+
+        monkeypatch.setattr("app.api.routes.weather.WeatherAPI.get_weather", fake_get_weather)
+
+        resp = client.get(self.WEATHER_URL, params=self.VALID)
+        assert resp.status_code == 500
+
     @pytest.mark.parametrize(
         "overrides, field",
         [
