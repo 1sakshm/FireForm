@@ -109,7 +109,7 @@ def call_model(prompt, schema, model=None, provider=None):
 def write_pdf(pdf_path, values, out_path):
     new_doc = PdfWriter(clone_from=pdf_path)
 
-    # pypdf sets checkboxes by appearance-state name ("/Yes"), not "Yes"
+    # pypdf sets checkboxes and radio buttons by appearance-state name ("/Yes"), not "Yes"
     for page in new_doc.pages:
         drop_null_parents(page)
         page_values = {}
@@ -117,8 +117,12 @@ def write_pdf(pdf_path, values, out_path):
             if widget.field_type == SIGNATURE:
                 continue
             value = values.get(widget.field_name, "")
-            if widget.field_type in (CHECKBOX, RADIOBUTTON):
+            if widget.field_type == CHECKBOX:
                 value = on_state(widget) if value == "Yes" else "/Off"
+            elif widget.field_type == RADIOBUTTON:
+                # The buttons of a group share its name, so all of them get the
+                # chosen option's state and pypdf turns on the one that has it
+                value = f"/{value}" if value and value != "Off" else "/Off"
             page_values[widget.field_name] = "" if value is None else str(value)
         if page_values:
             new_doc.update_page_form_field_values(page, page_values)
