@@ -6,6 +6,7 @@ Only the base URL and the API key differ.
 """
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 
@@ -99,7 +100,7 @@ class OpenAICompatibleLLM(LLM):
                     "falling back to the compatible model list without capability filtering",
                     self.provider.value,
                 )
-                return self._list_compatible_models(probe)
+                models = self._list_compatible_models(probe)
         else:
             models = self._list_compatible_models(probe)
 
@@ -107,7 +108,7 @@ class OpenAICompatibleLLM(LLM):
         if markers:
             models = [
                 model for model in models
-                if not any(marker in model.name.lower() for marker in markers)
+                if not _has_excluded_id_marker(model.name, markers)
             ]
         return models
 
@@ -298,3 +299,13 @@ def _redact_secret(message: str, secret: object) -> str:
     if isinstance(secret, str) and len(secret) >= 8 and secret != "not-needed":
         return message.replace(secret, "[redacted]")
     return message
+
+
+def _has_excluded_id_marker(model_id: str, markers: tuple[str, ...]) -> bool:
+    fragments = re.split(r"[-._]+", model_id.lower())
+    for marker in markers:
+        marker_fragments = re.split(r"[-._]+", marker.lower())
+        width = len(marker_fragments)
+        if any(fragments[index:index + width] == marker_fragments for index in range(len(fragments) - width + 1)):
+            return True
+    return False

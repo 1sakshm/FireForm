@@ -274,6 +274,29 @@ class TestResolve:
             OPENAI, "text-embedding-3-small"
         )
 
+    def test_manual_gemini_model_can_restore_excluded_id(self):
+        model = "gemini-3-pro-image-preview"
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            GEMINI: ProviderSettings(
+                spec=SPECS[GEMINI],
+                base_url="http://local:1",
+                models=ModelSelection.parse(f"g1,{model}"),
+                default_model="g1",
+                manual_models=(model,),
+            ),
+        }
+        registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), GEMINI: FakeLLM(GEMINI, ["g1"])},
+            settings=settings,
+        )
+
+        catalog = registry.provider_catalog(GEMINI)
+
+        assert catalog.offers(model)
+        assert next(item for item in catalog.models if item.name == model).manual is True
+        assert registry.resolve(GEMINI, model) == ModelChoice(GEMINI, model)
+
     def test_unreachable_provider_is_503(self, ollama):
         registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
         with pytest.raises(LLMUnavailableError, match="Could not reach gemini") as info:

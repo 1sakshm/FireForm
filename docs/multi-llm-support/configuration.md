@@ -67,17 +67,23 @@ Every LLM setting, as read from the env file. Empty means unset.
 Gemini models are listed through Gemini's native model-list API. FireForm
 removes a model only when Gemini provides `supportedGenerationMethods` and it
 does not include `generateContent`; models without that field are retained.
+It also approximately excludes IDs containing a complete hyphen-, dot- or
+underscore-separated fragment matching `tts`, `image`, `banana`, `lyria`,
+`transcribe`, `robotics`, `computer`, `research`, `antigravity`, `embedding`,
+`imagen`, `veo`, `live` or `aqa`. This short ID-based list may exclude a
+text-capable model or miss a non-text model as provider names change.
 The API key is sent in the `x-goog-api-key` header. If native listing returns
 404 or non-JSON, FireForm warns and falls back to the compatible model list
-without the capability filter. Listing follows `nextPageToken` for at most 20
-pages and warns if that limit is reached.
+without capability filtering; the ID-fragment filter still applies. Listing
+follows `nextPageToken` for at most 20 pages and warns if that limit is reached.
 
 OpenAI only provides model IDs in its list, so FireForm approximately excludes
-IDs containing `embedding`, `whisper`, `tts`, `dall-e`, `moderation`,
-`transcribe`, `realtime`, `image` or `audio` (case-insensitive). This is a
-name-based heuristic and can be wrong as model names change. Other providers,
-including Anthropic, custom servers and Ollama, are not filtered by these
-rules. A filtered model can still be entered and tested as a manual model.
+IDs containing a complete hyphen-, dot- or underscore-separated fragment
+matching `embedding`, `whisper`, `tts`, `dall-e`, `moderation`, `transcribe`,
+`realtime`, `image` or `audio`. This is a name-based heuristic and can be
+wrong as model names change. Other providers, including Anthropic, custom
+servers and Ollama, are not filtered by these rules. A filtered model can
+still be entered and tested as a manual model.
 
 Filtering applies at the provider model-list source. It therefore affects the
 catalog, startup `check_config()` and candidate configuration validation. A

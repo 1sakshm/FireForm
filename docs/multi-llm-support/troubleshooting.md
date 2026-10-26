@@ -47,8 +47,8 @@ The log also records when a provider goes down and when it comes back.
 
 ## Noisy model list
 
-Gemini is filtered using its `generateContent` capability, and OpenAI uses an
-approximate case-insensitive ID-marker filter. Other providers may list
+Gemini is filtered using its `generateContent` capability and approximate ID
+fragments; OpenAI uses approximate ID fragments only. Other providers may list
 non-text models; use an explicit `<PREFIX>_MODELS` list to limit those. See
 [Models shown in the catalog](configuration.md#models-shown-in-the-catalog)
 for the filter behavior and its manual-model escape hatch.

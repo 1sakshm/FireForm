@@ -505,6 +505,92 @@ class TestOpenAICompatibleLLM:
         )
         assert [model.name for model in llm.list_models()] == ["one"]
 
+    def test_gemini_catalog_excludes_non_text_id_fragments(self, monkeypatch):
+        llm = self._gemini()
+        model_ids = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemma-4-26b-a4b-it",
+            "gemma-4-31b-it",
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "gemini-pro-latest",
+            "gemini-2.5-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-customtools",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-omni-flash-preview",
+            "gemini-omni-1.1-flash",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+            "gemini-3.8-flash",
+            "gemini-4-argon",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-pro-preview-tts",
+            "gemini-2.5-flash-image",
+            "gemini-3-pro-image-preview",
+            "gemini-3-pro-image",
+            "nano-banana-pro-preview",
+            "gemini-3.1-flash-image-preview",
+            "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image",
+            "gemini-nano-banana-2.1",
+            "gemini-3.5-transcribe",
+            "lyria-3-clip-preview",
+            "lyria-3-pro-preview",
+            "lyria-3.5",
+            "gemini-3.1-flash-tts-preview",
+            "gemini-3.8-flash-tts",
+            "gemini-3.8-flash-lite-tts",
+            "gemini-robotics-er-2-preview",
+            "gemini-2.5-computer-use-preview-10-2025",
+            "antigravity-preview-05-2026",
+            "antigravity-preview-09-2026",
+            "antigravity-preview-latest",
+            "deep-research-max-preview-04-2026",
+            "deep-research-preview-04-2026",
+            "deep-research-pro-preview-12-2025",
+        ]
+        response = self._response(200, {
+            "models": [
+                {
+                    "name": f"models/{model_id}",
+                    "supportedGenerationMethods": ["generateContent"],
+                }
+                for model_id in model_ids
+            ],
+        })
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: response,
+        )
+
+        assert [model.name for model in llm.list_models()] == model_ids[:21]
+
+    def test_id_markers_match_only_complete_fragments(self, monkeypatch):
+        llm = self._gemini()
+        ids = [
+            "gemini-3-flash-live-preview",
+            "gemini-imaginary-flash",
+            "gemini-flash-imageish",
+            "gemini-image.flash",
+            "gemini_tts_preview",
+        ]
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: self._response(200, {
+                "models": [{"name": f"models/{model_id}"} for model_id in ids],
+            }),
+        )
+
+        assert [model.name for model in llm.list_models()] == [
+            "gemini-imaginary-flash", "gemini-flash-imageish",
+        ]
+
     def test_gemini_native_listing_stops_at_page_limit(self, monkeypatch, caplog):
         llm = self._gemini()
         calls = []
@@ -582,6 +668,7 @@ class TestOpenAICompatibleLLM:
         llm.client = MagicMock()
         llm.client.with_options.return_value.models.list.return_value = [
             SimpleNamespace(id="models/legacy-model"),
+            SimpleNamespace(id="models/gemini-image"),
         ]
         monkeypatch.setattr(
             "app.services.llm.openai_compatible.requests.get",
@@ -595,7 +682,7 @@ class TestOpenAICompatibleLLM:
         ids = [
             "text-embedding-3-small", "whisper-1", "tts-1", "dall-e-3",
             "moderation-latest", "gpt-transcribe", "gpt-realtime", "gpt-image",
-            "gpt-audio", "gpt-4o-mini",
+            "gpt-audio", "gpt-4o-mini", "embeddingish-encoder", "dalle-3", "gpt-imageish",
         ]
         openai_llm = OpenAICompatibleLLM(
             LLMProvider.openai, "https://api.openai.com/v1", "key", "gpt-4o-mini", 60
@@ -609,7 +696,9 @@ class TestOpenAICompatibleLLM:
                 SimpleNamespace(id=model_id) for model_id in ids
             ]
 
-        assert [model.name for model in openai_llm.list_models()] == ["gpt-4o-mini"]
+        assert [model.name for model in openai_llm.list_models()] == [
+            "gpt-4o-mini", "embeddingish-encoder", "dalle-3", "gpt-imageish",
+        ]
         assert [model.name for model in custom_llm.list_models()] == ids
 
     def test_structured_output_sends_schema(self):
