@@ -5,10 +5,12 @@ Groq, OpenRouter, and self hosted servers like vLLM, LM Studio and llama.cpp.
 Only the base URL and the API key differ.
 """
 
+import logging
 import time
 from contextlib import contextmanager
 
 import openai
+import requests
 
 from app.api.schemas.enums import HealthState, LLMProvider
 from app.services.llm.base import LLM, PROBE_TIMEOUT_SECONDS, LLMHealth, ModelInfo
@@ -21,6 +23,8 @@ from app.services.llm.errors import (
     LLMUnavailableError,
 )
 from app.services.llm.specs import SPECS
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatibleLLM(LLM):
@@ -44,7 +48,7 @@ class OpenAICompatibleLLM(LLM):
         self.structured_output = structured_output
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.listed_id_prefix = listed_id_prefix
+        self.listed_id_prefix = listed_id_prefix or SPECS[provider].listed_id_prefix
         self.client = openai.OpenAI(
             base_url=base_url,
             api_key=self._secret or "not-needed",
@@ -86,8 +90,114 @@ class OpenAICompatibleLLM(LLM):
 
     def list_models(self) -> list[ModelInfo]:
         probe = self.client.with_options(timeout=PROBE_TIMEOUT_SECONDS, max_retries=0)
+        spec = SPECS[self.provider]
+        if spec.native_model_list_url:
+            models = self._list_native_models(spec)
+            if models is None:
+                logger.warning(
+                    "%s native model listing returned 404 or non-JSON; "
+                    "falling back to the compatible model list without capability filtering",
+                    self.provider.value,
+                )
+                return self._list_compatible_models(probe)
+        else:
+            models = self._list_compatible_models(probe)
+
+        markers = tuple(marker.lower() for marker in spec.excluded_id_markers)
+        if markers:
+            models = [
+                model for model in models
+                if not any(marker in model.name.lower() for marker in markers)
+            ]
+        return models
+
+    def _list_compatible_models(self, probe) -> list[ModelInfo]:
         with self._translate_errors():
             return [ModelInfo(name=m.id.removeprefix(self.listed_id_prefix)) for m in probe.models.list()]
+
+    def _list_native_models(self, spec) -> list[ModelInfo] | None:
+        """List a provider's models with capability metadata; None requests fallback."""
+        models: list[ModelInfo] = []
+        page_token: str | None = None
+
+        for _ in range(spec.model_list_page_limit):
+            params = {"pageToken": page_token} if page_token else {}
+            try:
+                response = requests.get(
+                    spec.native_model_list_url,
+                    headers={spec.native_model_list_api_key_header: self._secret},
+                    params=params,
+                    timeout=PROBE_TIMEOUT_SECONDS,
+                )
+            except requests.Timeout as exc:
+                raise LLMUnavailableError(f"{self.provider.value} model listing timed out") from exc
+            except requests.RequestException as exc:
+                raise LLMUnavailableError(
+                    f"Could not reach {self.provider.value} at {spec.native_model_list_url}."
+                ) from exc
+
+            status = response.status_code
+            if status == 404:
+                return None
+            if status in (401, 403):
+                raise self._native_auth_error(response)
+            if status == 400:
+                reason = _native_error_reason(response, self._secret)
+                if "api key" in reason.lower():
+                    raise self._native_auth_error(response)
+                raise LLMResponseError(f"{self.provider.value} refused the model list request with 400: {reason}")
+            if status == 429:
+                reason = _native_error_reason(response, self._secret)
+                raise LLMRateLimitError(f"{self.provider.value} is rate limiting model-list requests: {reason}")
+            if status >= 500:
+                raise LLMUnavailableError(f"{self.provider.value} had a server error {status}")
+            if status >= 400:
+                reason = _native_error_reason(response, self._secret)
+                raise LLMResponseError(
+                    f"{self.provider.value} refused the model list request with {status}: {reason}"
+                )
+
+            try:
+                body = response.json()
+            except ValueError:
+                return None
+            if not isinstance(body, dict) or not isinstance(body.get("models"), list):
+                raise LLMResponseError(f"{self.provider.value} returned an invalid model-list response")
+
+            for item in body["models"]:
+                if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                    continue
+                methods = item.get("supportedGenerationMethods")
+                if (
+                    spec.required_generation_method
+                    and "supportedGenerationMethods" in item
+                    and (
+                        not isinstance(methods, list)
+                        or spec.required_generation_method not in methods
+                    )
+                ):
+                    continue
+                models.append(ModelInfo(name=item["name"].removeprefix(self.listed_id_prefix)))
+
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
+        else:
+            if page_token:
+                logger.warning(
+                    "%s native model listing reached the %d-page limit; results may be incomplete",
+                    self.provider.value,
+                    spec.model_list_page_limit,
+                )
+
+        return models
+
+    def _native_auth_error(self, response: requests.Response) -> LLMAuthError:
+        return LLMAuthError(
+            f"{self.provider.value} rejected the API key: "
+            f"{_native_error_reason(response, self._secret)}. "
+            f"Check {SPECS[self.provider].setting('API_KEY')}."
+        )
 
     def health(self) -> LLMHealth:
         t0 = time.monotonic()
@@ -165,6 +275,26 @@ def _reason(exc: openai.APIStatusError, secret: object = "") -> str:
             message = str(error["message"]).rstrip(".")
         elif isinstance(error, str):
             message = error.rstrip(".")
+    return _redact_secret(message, secret)
+
+
+def _native_error_reason(response: requests.Response, secret: str) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, list) and body:
+        body = body[0]
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return _redact_secret(error["message"].rstrip("."), secret)
+        if isinstance(error, str):
+            return _redact_secret(error.rstrip("."), secret)
+    return _redact_secret("request rejected", secret)
+
+
+def _redact_secret(message: str, secret: object) -> str:
     if isinstance(secret, str) and len(secret) >= 8 and secret != "not-needed":
-        message = message.replace(secret, "[redacted]")
+        return message.replace(secret, "[redacted]")
     return message

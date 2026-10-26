@@ -47,4 +47,8 @@ The log also records when a provider goes down and when it comes back.
 
 ## Noisy model list
 
-`*` returns everything the provider lists, including speech, image and embedding models. Use an explicit `<PREFIX>_MODELS` list to show only the models that can fill forms.
+Gemini is filtered using its `generateContent` capability, and OpenAI uses an
+approximate case-insensitive ID-marker filter. Other providers may list
+non-text models; use an explicit `<PREFIX>_MODELS` list to limit those. See
+[Models shown in the catalog](configuration.md#models-shown-in-the-catalog)
+for the filter behavior and its manual-model escape hatch.

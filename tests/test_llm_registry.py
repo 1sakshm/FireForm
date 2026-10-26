@@ -4,6 +4,9 @@ ModelValidator, and the endpoints on top of them.
 The registry tests use FakeLLM, so nothing goes over the network.
 """
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 import requests
 from sqlmodel import select
@@ -25,6 +28,7 @@ from app.services.llm import (
     ProviderSettings,
 )
 from app.services.llm.registry import CACHE_SECONDS, FAILURE_CACHE_SECONDS
+from app.services.llm.openai_compatible import OpenAICompatibleLLM
 from app.services.llm.selection import ModelSelection
 from app.services.llm.specs import DEFAULT_OLLAMA_INSTALLABLE_MODELS, SPECS
 
@@ -86,6 +90,21 @@ def _registry(clients, settings=None, warnings=(), clock=None):
     }
     llm_settings = LLMSettings(providers=settings, default_provider=OLLAMA, warnings=tuple(warnings))
     return LLMRegistry(llm_settings, clients, clock=clock or Clock())
+
+
+def _openai_listing(ids):
+    client = OpenAICompatibleLLM(
+        OPENAI,
+        "https://api.openai.com/v1",
+        "test-key",
+        "gpt-4o-mini",
+        5,
+    )
+    client.client = MagicMock()
+    client.client.with_options.return_value.models.list.return_value = [
+        SimpleNamespace(id=model_id) for model_id in ids
+    ]
+    return client
 
 
 @pytest.fixture
@@ -212,6 +231,48 @@ class TestResolve:
         assert catalog.offers("manual-model")
         assert next(model for model in catalog.models if model.name == "manual-model").manual is True
         assert registry.resolve(GEMINI, "manual-model") == ModelChoice(GEMINI, "manual-model")
+
+    def test_openai_filtered_model_is_not_offered_or_resolvable(self):
+        openai_client = _openai_listing(["text-embedding-3-small", "gpt-4o-mini"])
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            OPENAI: _provider(OPENAI, "*", "gpt-4o-mini"),
+        }
+        registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), OPENAI: openai_client},
+            settings=settings,
+        )
+
+        catalog = registry.provider_catalog(OPENAI)
+
+        assert [model.name for model in catalog.models] == ["gpt-4o-mini"]
+        with pytest.raises(LLMNotAvailableError, match="does not offer text-embedding-3-small"):
+            registry.resolve(OPENAI, "text-embedding-3-small")
+
+    def test_manual_model_can_explicitly_restore_filtered_model(self):
+        openai_client = _openai_listing(["text-embedding-3-small", "gpt-4o-mini"])
+        settings = {
+            OLLAMA: _provider(OLLAMA, "*", "qwen"),
+            OPENAI: ProviderSettings(
+                spec=SPECS[OPENAI],
+                base_url="http://local:1",
+                models=ModelSelection.parse("*"),
+                default_model="gpt-4o-mini",
+                manual_models=("text-embedding-3-small",),
+            ),
+        }
+        registry = _registry(
+            {OLLAMA: FakeLLM(OLLAMA, ["qwen"]), OPENAI: openai_client},
+            settings=settings,
+        )
+
+        catalog = registry.provider_catalog(OPENAI)
+
+        assert [model.name for model in catalog.models] == ["gpt-4o-mini", "text-embedding-3-small"]
+        assert catalog.models[1].manual is True
+        assert registry.resolve(OPENAI, "text-embedding-3-small") == ModelChoice(
+            OPENAI, "text-embedding-3-small"
+        )
 
     def test_unreachable_provider_is_503(self, ollama):
         registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
@@ -381,6 +442,24 @@ class TestModelValidator:
             "GEMINI_MODELS has g2, but gemini does not offer it. It is left out of the model list.",
         ]
 
+    def test_filtered_default_warns_without_crashing_or_switching_provider(self):
+        openai_client = _openai_listing(["text-embedding-3-small", "gpt-4o-mini"])
+        settings = {
+            OPENAI: _provider(OPENAI, "*", "text-embedding-3-small"),
+        }
+        registry = LLMRegistry(
+            LLMSettings(providers=settings, default_provider=OPENAI),
+            {OPENAI: openai_client},
+        )
+
+        warnings = ModelValidator(registry).check_config()
+
+        assert warnings == [
+            "openai does not offer the default model text-embedding-3-small. Fills will fail."
+        ]
+        assert registry.resolve() == ModelChoice(OPENAI, "text-embedding-3-small")
+        assert registry.default.provider is OPENAI
+
     def test_check_config_unreachable(self, ollama):
         registry = _registry({OLLAMA: ollama, GEMINI: FakeLLM(GEMINI, down=True)})
         assert ModelValidator(registry).check_config() == [
@@ -480,6 +559,52 @@ class TestLLMEndpoints:
         assert response.json()["ok"] is True
         assert [model["name"] for model in response.json()["models"]] == ["model-a"]
         assert db.exec(select(LLMProviderCredential)).all() == []
+
+    def test_models_endpoint_uses_provider_source_filter(self, client, monkeypatch):
+        registry = _registry(
+            {
+                OLLAMA: FakeLLM(OLLAMA, ["qwen"]),
+                OPENAI: _openai_listing(["text-embedding-3-small", "gpt-4o-mini"]),
+            },
+            settings={
+                OLLAMA: _provider(OLLAMA, "*", "qwen"),
+                OPENAI: _provider(OPENAI, "*", "gpt-4o-mini"),
+            },
+        )
+        monkeypatch.setattr("app.services.llm.effective_registry", lambda _db: registry)
+
+        response = client.get(f"{API_PREFIX}/system/llm/models")
+
+        assert response.status_code == 200
+        openai_provider = next(
+            item for item in response.json()["providers"] if item["provider"] == "openai"
+        )
+        assert [model["name"] for model in openai_provider["models"]] == ["gpt-4o-mini"]
+
+    def test_candidate_validation_uses_provider_source_filter(self, client, monkeypatch):
+        from app.api.routes import llm_config
+
+        candidate = _registry(
+            {
+                OLLAMA: FakeLLM(OLLAMA, ["qwen"]),
+                OPENAI: _openai_listing(["text-embedding-3-small", "gpt-4o-mini"]),
+            },
+            settings={
+                OLLAMA: _provider(OLLAMA, "*", "qwen"),
+                OPENAI: _provider(OPENAI, "*", "gpt-4o-mini"),
+            },
+        )
+        monkeypatch.setattr(llm_config, "registry_for_candidate", lambda *_args, **_kwargs: candidate)
+        monkeypatch.setattr(llm_config, "_require_external_consent", lambda *_args, **_kwargs: None)
+
+        response = client.post(
+            f"{API_PREFIX}/system/llm/providers/config/openai/validate",
+            json={"api_key": "candidate-key"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert [model["name"] for model in response.json()["models"]] == ["gpt-4o-mini"]
 
     def test_validation_error_redacts_candidate_key(self, client, db, monkeypatch, caplog):
         from app.api.routes import llm_config

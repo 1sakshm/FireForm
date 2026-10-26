@@ -210,13 +210,21 @@ class TestLoadSettings:
         assert llm.temperature == 0.0
         assert llm.max_tokens is None
 
-    def test_gemini_ids_lose_their_prefix(self):
+    def test_gemini_ids_lose_their_prefix(self, monkeypatch):
         settings = load_settings(_only("gemini", {"API_KEY": "gk", "MODELS": "g"}, LLM_ALLOW_EXTERNAL="true"))
         llm = create_llm(settings.providers[LLMProvider.gemini])
-        llm.client = MagicMock()
-        llm.client.with_options.return_value.models.list.return_value = [
-            SimpleNamespace(id="models/gemini-2.5-flash"), SimpleNamespace(id="gemini-3.8-flash"),
-        ]
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "models": [
+                {"name": "models/gemini-2.5-flash"},
+                {"name": "gemini-3.8-flash"},
+            ],
+        }
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: response,
+        )
         assert [m.name for m in llm.list_models()] == ["gemini-2.5-flash", "gemini-3.8-flash"]
 
     def test_anthropic_sends_version_header(self):
@@ -432,6 +440,177 @@ def _status_error(cls, code, body=None):
 
 
 class TestOpenAICompatibleLLM:
+
+    @staticmethod
+    def _gemini():
+        return OpenAICompatibleLLM(
+            LLMProvider.gemini,
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "gemini-secret-value",
+            "gemini-2.5-flash",
+            60,
+        )
+
+    @staticmethod
+    def _response(status_code=200, body=None, text=""):
+        response = MagicMock()
+        response.status_code = status_code
+        response.text = text
+        response.json.side_effect = ValueError("not JSON") if body is None else None
+        if body is not None:
+            response.json.return_value = body
+        return response
+
+    def test_gemini_native_list_filters_capabilities_and_paginates(self, monkeypatch):
+        llm = self._gemini()
+        responses = iter([
+            self._response(200, {
+                "models": [
+                    {"name": "models/gemini-text", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-image", "supportedGenerationMethods": ["predict"]},
+                    {"name": "models/gemini-unknown"},
+                ],
+                "nextPageToken": "next-page",
+            }),
+            self._response(200, {
+                "models": [
+                    {"name": "models/gemini-second", "supportedGenerationMethods": ["generateContent"]},
+                ],
+            }),
+        ])
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return next(responses)
+
+        monkeypatch.setattr("app.services.llm.openai_compatible.requests.get", fake_get)
+
+        assert [model.name for model in llm.list_models()] == [
+            "gemini-text", "gemini-unknown", "gemini-second",
+        ]
+        assert len(calls) == 2
+        assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/models"
+        assert calls[0][1]["headers"] == {"x-goog-api-key": "gemini-secret-value"}
+        assert calls[0][1]["params"] == {}
+        assert calls[1][1]["params"] == {"pageToken": "next-page"}
+        assert all("pageSize" not in call[1]["params"] for call in calls)
+        assert all("gemini-secret-value" not in call[0] for call in calls)
+
+    def test_gemini_native_single_page(self, monkeypatch):
+        llm = self._gemini()
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: self._response(200, {"models": [{"name": "models/one"}]}),
+        )
+        assert [model.name for model in llm.list_models()] == ["one"]
+
+    def test_gemini_native_listing_stops_at_page_limit(self, monkeypatch, caplog):
+        llm = self._gemini()
+        calls = []
+
+        def fake_get(_url, **kwargs):
+            calls.append(kwargs)
+            return self._response(200, {
+                "models": [{"name": f"models/page-{len(calls)}"}],
+                "nextPageToken": f"token-{len(calls)}",
+            })
+
+        monkeypatch.setattr("app.services.llm.openai_compatible.requests.get", fake_get)
+
+        models = llm.list_models()
+
+        assert len(calls) == 20
+        assert len(models) == 20
+        assert "20-page limit" in caplog.text
+
+    @pytest.mark.parametrize("status_code, body", [
+        (400, [{"error": {"message": "API key not valid: gemini-secret-value"}}]),
+        (403, {"error": {"message": "permission denied"}}),
+    ])
+    def test_gemini_native_auth_errors_are_redacted(self, monkeypatch, caplog, status_code, body):
+        llm = self._gemini()
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: self._response(status_code, body),
+        )
+
+        with pytest.raises(LLMAuthError) as info:
+            llm.list_models()
+
+        assert "gemini-secret-value" not in info.value.message
+        assert "gemini-secret-value" not in caplog.text
+        assert info.value.error_code == "LLM_AUTH_FAILED"
+
+    def test_gemini_native_rate_limit_error(self, monkeypatch):
+        llm = self._gemini()
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: self._response(429, {"error": {"message": "slow down"}}),
+        )
+        with pytest.raises(LLMRateLimitError):
+            llm.list_models()
+
+    @pytest.mark.parametrize("failure", [
+        requests.Timeout("simulated timeout"),
+        requests.ConnectionError("simulated connection failure"),
+    ])
+    def test_gemini_native_network_errors_are_unavailable(self, monkeypatch, failure):
+        llm = self._gemini()
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            MagicMock(side_effect=failure),
+        )
+        with pytest.raises(LLMUnavailableError):
+            llm.list_models()
+
+    def test_gemini_native_server_error_is_unavailable(self, monkeypatch):
+        llm = self._gemini()
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: self._response(503, {"error": {"message": "maintenance"}}),
+        )
+        with pytest.raises(LLMUnavailableError):
+            llm.list_models()
+
+    @pytest.mark.parametrize("response", [
+        _response.__func__(404, {"error": {"message": "not found"}}),
+        _response.__func__(200, None, "not JSON"),
+    ])
+    def test_gemini_native_falls_back_to_compatible_list(self, monkeypatch, caplog, response):
+        llm = self._gemini()
+        llm.client = MagicMock()
+        llm.client.with_options.return_value.models.list.return_value = [
+            SimpleNamespace(id="models/legacy-model"),
+        ]
+        monkeypatch.setattr(
+            "app.services.llm.openai_compatible.requests.get",
+            lambda *_args, **_kwargs: response,
+        )
+
+        assert [model.name for model in llm.list_models()] == ["legacy-model"]
+        assert "without capability filtering" in caplog.text
+
+    def test_openai_excludes_non_text_model_id_markers_only_for_openai(self):
+        ids = [
+            "text-embedding-3-small", "whisper-1", "tts-1", "dall-e-3",
+            "moderation-latest", "gpt-transcribe", "gpt-realtime", "gpt-image",
+            "gpt-audio", "gpt-4o-mini",
+        ]
+        openai_llm = OpenAICompatibleLLM(
+            LLMProvider.openai, "https://api.openai.com/v1", "key", "gpt-4o-mini", 60
+        )
+        custom_llm = OpenAICompatibleLLM(
+            LLMProvider.custom, "http://local:8000/v1", "", "gpt-4o-mini", 60
+        )
+        for llm in (openai_llm, custom_llm):
+            llm.client = MagicMock()
+            llm.client.with_options.return_value.models.list.return_value = [
+                SimpleNamespace(id=model_id) for model_id in ids
+            ]
+
+        assert [model.name for model in openai_llm.list_models()] == ["gpt-4o-mini"]
+        assert [model.name for model in custom_llm.list_models()] == ids
 
     def test_structured_output_sends_schema(self):
         llm = _openai_llm(structured_output=True, temperature=0.0)
