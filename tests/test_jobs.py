@@ -28,7 +28,7 @@ class TestJobEndpoints:
                 "fields": {"name": "string"},
             },
         )
-        assert resp.status_code == 200, resp.json()
+        assert resp.status_code == 200
         return resp.json()["id"]
 
     def _seed_input(
@@ -167,7 +167,7 @@ class TestJobEndpoints:
             "input_id": str(input_id),
             "model": "mistral:latest",
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.json()
         mock_task.apply_async.assert_called_once_with(
             (tpl_id, "test", str(input_id), "mistral:latest", "ollama"), task_id=ANY
         )
