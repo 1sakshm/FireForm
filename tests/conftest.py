@@ -25,7 +25,7 @@ from app.models import (  # noqa: F401 — registers tables
     Report,
     Template,
 )
-from app.services.llm import LLMRegistry, LLMSettings, ProviderSettings
+from app.services.llm import LLMRegistry, LLMSettings, ProviderSettings, user_config
 from app.services.llm.ollama import OllamaLLM
 from app.services.llm.selection import ModelSelection
 from app.services.llm.specs import SPECS
@@ -75,8 +75,12 @@ def test_registry(monkeypatch):
         default_provider=LLMProvider.ollama,
     )
     registry = LLMRegistry(settings, {LLMProvider.ollama: OllamaLLM("http://ollama:11434", "qwen2.5:1.5b", 5)})
+    user_config.invalidate_registry_cache()
     monkeypatch.setattr("app.services.llm.get_registry", lambda: registry)
-    return registry
+    try:
+        yield registry
+    finally:
+        user_config.invalidate_registry_cache()
 
 
 @pytest.fixture

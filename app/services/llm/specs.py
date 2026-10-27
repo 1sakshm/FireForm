@@ -19,6 +19,11 @@ class ProviderSpec:
     max_tokens: int | None = None
     headers: tuple[tuple[str, str], ...] = ()
     listed_id_prefix: str = ""
+    native_model_list_url: str = ""
+    native_model_list_api_key_header: str = ""
+    required_generation_method: str = ""
+    model_list_page_limit: int = 20
+    excluded_id_markers: tuple[str, ...] = ()
 
     @property
     def prefix(self) -> str:
@@ -34,9 +39,45 @@ class ProviderSpec:
 
 SPECS: dict[LLMProvider, ProviderSpec] = {
     LLMProvider.ollama: ProviderSpec(LLMProvider.ollama, needs_key=False),
-    LLMProvider.openai: ProviderSpec(LLMProvider.openai, "https://api.openai.com/v1"),
+    LLMProvider.openai: ProviderSpec(
+        LLMProvider.openai,
+        "https://api.openai.com/v1",
+        excluded_id_markers=(
+            "embedding",
+            "whisper",
+            "tts",
+            "dall-e",
+            "moderation",
+            "transcribe",
+            "realtime",
+            "image",
+            "audio",
+        ),
+    ),
     LLMProvider.gemini: ProviderSpec(
-        LLMProvider.gemini, "https://generativelanguage.googleapis.com/v1beta/openai/", listed_id_prefix="models/"
+        LLMProvider.gemini,
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        listed_id_prefix="models/",
+        native_model_list_url="https://generativelanguage.googleapis.com/v1beta/models",
+        native_model_list_api_key_header="x-goog-api-key",
+        required_generation_method="generateContent",
+        model_list_page_limit=20,
+        excluded_id_markers=(
+            "tts",
+            "image",
+            "banana",
+            "lyria",
+            "transcribe",
+            "robotics",
+            "computer",
+            "research",
+            "antigravity",
+            "embedding",
+            "imagen",
+            "veo",
+            "live",
+            "aqa",
+        ),
     ),
     LLMProvider.anthropic: ProviderSpec(
         LLMProvider.anthropic,
@@ -47,3 +88,10 @@ SPECS: dict[LLMProvider, ProviderSpec] = {
     ),
     LLMProvider.custom: ProviderSpec(LLMProvider.custom, needs_key=False),
 }
+
+DEFAULT_OLLAMA_INSTALLABLE_MODELS: tuple[str, ...] = (
+    "qwen2.5:1.5b",
+    "qwen2.5:3b",
+    "qwen2.5:7b",
+    "llama3.2:3b",
+)
