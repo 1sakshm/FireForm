@@ -15,6 +15,7 @@ import os
 
 from pypdf import PdfWriter
 
+from app.models.models import Profile
 from app.services import llm
 
 from . import template
@@ -24,7 +25,30 @@ with open(os.path.join(os.path.dirname(__file__), "prompt.txt"), "r") as f:
     PROMPT = f.read()
 
 
-def fill(pdf_path, narrative, out_path=None, model=None, description="", provider=None, registry=None):
+def append_profile_context(base_prompt: str, profile: Profile = None) -> str:
+    if not profile:
+        return base_prompt
+        
+    desc = profile.description if profile.description else "N/A"
+        
+    profile_context = (
+        "=== USER PROFILE CONTEXT ===\n"
+        "The form is being filled out by a user with the following profile:\n"
+        f"- Name: {profile.name}\n"
+        f"- Profession: {profile.profession}\n"
+        f"- Role: {profile.role}\n"
+        f"- Description: {desc}\n"
+    )
+    
+    if profile.custom_fields:
+        for key, value in profile.custom_fields.items():
+            profile_context += f"- {key.capitalize()}: {value}\n"
+            
+    profile_context += "\nPlease use this context to provide more relevant and tailored field suggestions and validations.\n\n"
+    return profile_context + base_prompt
+
+
+def fill(pdf_path, narrative, out_path=None, model=None, description="", provider=None, registry=None, profile: Profile = None):
     """Fill pdf_path from the narrative. Writes the PDF when out_path is given.
 
     Returns {schema, tables, groups, prompt, response_text, values}: the
@@ -34,7 +58,7 @@ def fill(pdf_path, narrative, out_path=None, model=None, description="", provide
     schema, tables, groups = template.create_template(pdf_path)
     strip_empty_descriptions(schema["properties"])
 
-    prompt = build_prompt(narrative, schema, description)
+    prompt = build_prompt(narrative, schema, description, profile)
     response_text = call_model(prompt, schema, model, provider, registry=registry)
 
     # Tables come back as arrays of rows; map them to widget names
@@ -62,7 +86,7 @@ def strip_empty_descriptions(props):
     return props
 
 
-def build_prompt(narrative, schema, description=""):
+def build_prompt(narrative, schema, description="", profile: Profile = None):
     # Omitted entirely when blank so the model is not handed an empty block.
     context = f"<template_description>\n{description}\n</template_description>\n\n" if description else ""
     user_content = (
@@ -73,7 +97,8 @@ def build_prompt(narrative, schema, description=""):
         + json.dumps(schema["properties"], indent=2, ensure_ascii=False)
         + "\n</target_json_schema>"
     )
-    return PROMPT.rstrip() + "\n\n" + user_content
+    base_prompt = PROMPT.rstrip() + "\n\n" + user_content
+    return append_profile_context(base_prompt, profile)
 
 
 def call_model(prompt, schema, model=None, provider=None, registry=None):
@@ -85,7 +110,7 @@ def call_model(prompt, schema, model=None, provider=None, registry=None):
 def write_pdf(pdf_path, values, out_path):
     new_doc = PdfWriter(clone_from=pdf_path)
 
-    # pypdf sets checkboxes by appearance-state name ("/Yes"), not "Yes"
+    # pypdf sets checkboxes and radio buttons by appearance-state name ("/Yes"), not "Yes"
     for page in new_doc.pages:
         drop_null_parents(page)
         page_values = {}
@@ -93,8 +118,12 @@ def write_pdf(pdf_path, values, out_path):
             if widget.field_type == SIGNATURE:
                 continue
             value = values.get(widget.field_name, "")
-            if widget.field_type in (CHECKBOX, RADIOBUTTON):
+            if widget.field_type == CHECKBOX:
                 value = on_state(widget) if value == "Yes" else "/Off"
+            elif widget.field_type == RADIOBUTTON:
+                # The buttons of a group share its name, so all of them get the
+                # chosen option's state and pypdf turns on the one that has it
+                value = f"/{value}" if value and value != "Off" else "/Off"
             page_values[widget.field_name] = "" if value is None else str(value)
         if page_values:
             new_doc.update_page_form_field_values(page, page_values)

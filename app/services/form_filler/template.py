@@ -36,12 +36,14 @@ def create_template(pdf_path):
     """(schema, tables, groups) for a fillable PDF.
 
     schema is what the model fills: geometry tables as arrays, every other
-    widget as a scalar, each described by its /TU tooltip. tables and groups
-    map array rows back to widget names (expand_output).
+    widget as a scalar, each described by its /TU tooltip. A radio group's
+    scalar is one of its options. tables and groups map array rows back to
+    widget names (expand_output).
     """
     layout = geometry.extract(os.path.abspath(pdf_path))
     all_tables, all_groups, schema = build_schema(layout)
     add_tooltip_descriptions(schema, all_groups, read_tooltips(pdf_path))
+    add_radio_options(schema, read_radio_options(pdf_path))
     return schema, all_tables, all_groups
 
 
@@ -196,3 +198,28 @@ def add_tooltip_descriptions(schema, groups, tooltips):
                 column_prop["description"] = describe(column)
         else:
             prop["description"] = describe(key)
+
+
+# -------------------------------------------------------------- radio groups
+
+def read_radio_options(pdf_path):
+    """{group name: options}: the state that turns each of its buttons on
+    ("Male", "Female"), in page order."""
+    options = {}
+    for page in PdfReader(pdf_path).pages:
+        for widget in geometry.page_widgets(page):
+            if widget.field_type == geometry.RADIOBUTTON:
+                group = options.setdefault(widget.field_name, [])
+                option = geometry.on_state(widget)[1:]
+                if option not in group:
+                    group.append(option)
+    return options
+
+
+def add_radio_options(schema, options):
+    """A radio group is answered with one of its options, or "Off" for none,
+    like a checkbox. Groups read as table columns are left as they are."""
+    for key, prop in schema["properties"].items():
+        if key in options:
+            prop.pop("type", None)
+            prop["enum"] = options[key] + ["Off"]

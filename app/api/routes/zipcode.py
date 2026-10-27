@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from fastapi.exceptions import RequestValidationError
 
 from app.core.errors.base import AppError
 from app.services.external_apis.zipcode_api import ZipCodeAPI
@@ -19,11 +20,26 @@ def lookup_address(address: str):
     Example: 
         address = "1600 Amphitheatre Parkway, Mountain View, CA, US"
     """
+    if not address.strip():
+        raise RequestValidationError(
+            errors=[
+                {
+                    "loc": ("query", "address"),
+                    "msg": "address must not be blank",
+                    "input": address,
+                    "type": "value_error",
+                }
+            ]
+        )
+
     zipcode_api = ZipCodeAPI()
     try:
         return zipcode_api.lookup_address(address)
     except TimeoutError as e:
-        raise AppError(str(e), status_code=504)
+        raise AppError(str(e), status_code=504, error_code="GEOCODING_TIMEOUT")
+    except RuntimeError as e:
+        # Nominatim answered with an error: the failure is upstream, not ours
+        raise AppError(str(e), status_code=502, error_code="GEOCODING_FAILED")
     except Exception as e:
         raise AppError(str(e), status_code=500)
 

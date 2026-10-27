@@ -2,6 +2,7 @@ from datetime import date
 
 from fastapi import APIRouter, Query
 from fastapi.exceptions import RequestValidationError
+from openmeteo_requests.Client import OpenMeteoRequestsError
 
 from app.core.errors.base import AppError
 from app.services.external_apis.weather_api import WeatherAPI
@@ -55,5 +56,8 @@ def get_weather_forecast(
             latitude, longitude, start_date.isoformat(), end_date.isoformat(), hourly_fields=requested
         )
         return weather_data
+    except OpenMeteoRequestsError as e:
+        # Open-Meteo failed or was unreachable: the failure is upstream, not ours
+        raise AppError(str(e), status_code=502, error_code="WEATHER_FETCH_FAILED")
     except Exception as e:
         raise AppError(str(e), status_code=500)

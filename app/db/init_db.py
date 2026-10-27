@@ -7,6 +7,7 @@ from alembic.util import CommandError
 from sqlmodel import Session, select, text
 
 from alembic import command
+from app.core.config import SEED_TEMPLATE_PDF_PATH
 from app.db.database import engine
 from app.models import Template
 
@@ -69,7 +70,7 @@ def seed_db():
                     "their contact details, and their signature."
                 ),
                 fields=fields,
-                pdf_path="data/inputs/file_template_manual.pdf",
+                pdf_path=SEED_TEMPLATE_PDF_PATH,
                 created_at=datetime.datetime.now(datetime.timezone.utc),
             )
             session.add(default_template)

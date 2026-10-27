@@ -12,6 +12,7 @@ from app.api.schemas.templates import (
     TemplateUploadResponse,
 )
 from app.core import paths
+from app.core.config import SEED_TEMPLATE_PDF_PATH
 from app.core.errors.base import AppError
 from app.core.pdf_utils import _count_pdf_widgets, _extract_pdf_fields
 from app.db.repositories import (
@@ -205,12 +206,30 @@ class TemplateService:
         if template.pdf_path:
             try:
                 resolved_pdf = paths._resolve_project_file(template.pdf_path)
-                if resolved_pdf.exists() and resolved_pdf.is_file():
+                if (
+                    resolved_pdf.exists()
+                    and resolved_pdf.is_file()
+                    and not self._pdf_still_needed(session, template, resolved_pdf)
+                ):
                     resolved_pdf.unlink()
             except Exception:
                 pass
 
         delete_template(session, template)
+
+    def _pdf_still_needed(self, session: Session, template: Template, resolved_pdf: Path) -> bool:
+        # The seed PDF ships with the repo, and other templates may point at the same file.
+        if resolved_pdf == paths._resolve_project_file(SEED_TEMPLATE_PDF_PATH):
+            return True
+        for other in repo_list_templates(session):
+            if other.id == template.id or not other.pdf_path:
+                continue
+            try:
+                if paths._resolve_project_file(other.pdf_path) == resolved_pdf:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def update_template(
         self, session: Session, template: Template, changes: TemplateUpdate

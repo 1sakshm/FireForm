@@ -24,6 +24,8 @@ DATA_DIR = Path(os.getenv("FIREFORM_DATA_DIR", BASE_DIR / "data")).resolve()
 # Directory new uploads land in, as a project-relative string (was "src/inputs"
 # before the restructure). Override with FIREFORM_TEMPLATE_DIR.
 DEFAULT_TEMPLATE_DIR = os.getenv("FIREFORM_TEMPLATE_DIR", "data/inputs")
+# Bundled PDF behind the seeded "Manual Test Template"; never deleted with a template.
+SEED_TEMPLATE_PDF_PATH = "data/inputs/file_template_manual.pdf"
 
 # --- Database -------------------------------------------------------------
 DATABASE_URL = os.getenv(
