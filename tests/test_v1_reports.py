@@ -330,6 +330,34 @@ class TestGetReportEndpoint:
         assert 'attachment; filename="FireForm_Monthly_2024-07.pdf"' in resp.headers.get("content-disposition", "")
         assert resp.content.startswith(b"%PDF")
 
+    def test_report_pdf_not_overwritten_by_later_report_for_same_period(self, client, db):
+        svc = ReportingService()
+        _seed_submission(db, created_at=datetime(2024, 7, 15, 10, 30, tzinfo=timezone.utc))
+        first = Report(period_type=PeriodType.monthly, year=2024, month=7,
+                       output_format=OutputFormat.pdf, status=JobStatus.queued)
+        db.add(first)
+        db.commit()
+        svc.generate_report(db, first.report_id)
+        first_pdf = client.get(f"{REPORTS_URL}/{first.report_id}").content
+
+        # More submissions arrive, then July is reported again
+        _seed_submission(db, created_at=datetime(2024, 7, 20, 9, 0, tzinfo=timezone.utc))
+        second = Report(period_type=PeriodType.monthly, year=2024, month=7,
+                        output_format=OutputFormat.pdf, status=JobStatus.queued)
+        db.add(second)
+        db.commit()
+        svc.generate_report(db, second.report_id)
+
+        db.refresh(first)
+        db.refresh(second)
+        assert first.pdf_path != second.pdf_path
+        resp = client.get(f"{REPORTS_URL}/{first.report_id}")
+        assert resp.content == first_pdf
+        assert first.json_data["summary"]["total_submissions"] == 1
+        assert second.json_data["summary"]["total_submissions"] == 2
+        # The download name still names the period
+        assert 'filename="FireForm_Monthly_2024-07.pdf"' in resp.headers["content-disposition"]
+
     def test_report_pdf_file_missing_returns_500(self, client, db):
         report = Report(
             period_type=PeriodType.monthly,

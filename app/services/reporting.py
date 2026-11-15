@@ -230,7 +230,9 @@ class ReportingService:
         # 3. Generate PDF if format requires it
         pdf_path_str: str | None = None
         if report.output_format in (OutputFormat.pdf, OutputFormat.both):
-            pdf_path = Path(REPORTS_DIR) / pdf_filename
+            # One folder per report: the filename only names the period, so
+            # a second report for the same period would overwrite this one.
+            pdf_path = Path(REPORTS_DIR) / str(report.report_id) / pdf_filename
             self._generate_pdf(pdf_path, periodic_report)
             pdf_path_str = str(pdf_path)
 
